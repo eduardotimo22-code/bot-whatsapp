@@ -5,29 +5,41 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Users, MessageSquare, Search } from 'lucide-react'
+import { Users, MessageSquare, Search, Pencil, Trash2, Check, X, ExternalLink } from 'lucide-react'
 import type { Contact } from '@/types'
 import Link from 'next/link'
+import { toast } from 'sonner'
 
 type ContactWithConv = Contact & {
   conv_status: 'active' | 'escalated' | 'resolved' | null
   conv_id: string | null
 }
 
+interface EditForm {
+  name: string
+  email: string
+  interest: string
+}
+
 const convStatusVariant = {
-  active:   'default'     as const,
-  escalated:'destructive' as const,
-  resolved: 'secondary'   as const,
+  active:    'default'     as const,
+  escalated: 'destructive' as const,
+  resolved:  'secondary'   as const,
 }
 
 const convStatusLabel = {
-  active:   'Activa',
-  escalated:'Escalada',
-  resolved: 'Resuelta',
+  active:    'Activa',
+  escalated: 'Escalada',
+  resolved:  'Resuelta',
 }
 
-export function ContactsList({ contacts }: { contacts: ContactWithConv[] }) {
+export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[] }) {
+  const [contacts, setContacts] = useState(initial)
   const [search, setSearch] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState<EditForm>({ name: '', email: '', interest: '' })
+  const [saving, setSaving] = useState(false)
+  const [pushingId, setPushingId] = useState<string | null>(null)
 
   const q = search.trim().toLowerCase()
   const visible = q
@@ -41,6 +53,72 @@ export function ContactsList({ contacts }: { contacts: ContactWithConv[] }) {
     : contacts
 
   const withNotion = contacts.filter((c) => c.notion_page_id).length
+
+  function startEdit(contact: ContactWithConv) {
+    setEditingId(contact.id)
+    setEditForm({
+      name: contact.name ?? '',
+      email: contact.email ?? '',
+      interest: contact.interest ?? '',
+    })
+  }
+
+  async function saveEdit(id: string) {
+    setSaving(true)
+    try {
+      const res = await fetch(`/api/contacts/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editForm),
+      })
+      if (!res.ok) throw new Error()
+      setContacts((prev) =>
+        prev.map((c) =>
+          c.id === id
+            ? { ...c, name: editForm.name || null, email: editForm.email || null, interest: editForm.interest || null }
+            : c
+        )
+      )
+      setEditingId(null)
+      toast.success('Contacto actualizado')
+    } catch {
+      toast.error('No se pudo guardar')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function deleteContact(id: string) {
+    if (!confirm('¿Eliminar este contacto? Esta acción no se puede deshacer.')) return
+    const res = await fetch(`/api/contacts/${id}`, { method: 'DELETE' })
+    if (res.ok) {
+      setContacts((prev) => prev.filter((c) => c.id !== id))
+      toast.success('Contacto eliminado')
+    } else {
+      toast.error('No se pudo eliminar')
+    }
+  }
+
+  async function pushToNotion(id: string) {
+    setPushingId(id)
+    try {
+      const res = await fetch(`/api/contacts/${id}`, { method: 'POST' })
+      if (res.ok) {
+        const data = await res.json() as { notion_page_id: string }
+        setContacts((prev) =>
+          prev.map((c) => c.id === id ? { ...c, notion_page_id: data.notion_page_id } : c)
+        )
+        toast.success('Lead guardado en Notion')
+      } else {
+        const err = await res.json() as { error: string }
+        toast.error(err.error === 'already in Notion' ? 'Ya está en Notion' : 'Error al sincronizar')
+      }
+    } catch {
+      toast.error('Error de conexión')
+    } finally {
+      setPushingId(null)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -88,43 +166,113 @@ export function ContactsList({ contacts }: { contacts: ContactWithConv[] }) {
               <CardContent>
                 <div className="divide-y">
                   {visible.map((contact) => (
-                    <div key={contact.id} className="py-3 flex items-start justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-medium text-sm">{contact.name || 'Sin nombre'}</span>
-                          <span className="text-xs text-muted-foreground">{contact.phone}</span>
-                        </div>
-                        {contact.email && (
-                          <p className="text-xs text-muted-foreground mt-0.5">{contact.email}</p>
-                        )}
-                        {contact.interest && (
-                          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
-                            Interés: {contact.interest}
-                          </p>
-                        )}
-                      </div>
-
-                      <div className="flex items-center gap-2 shrink-0 flex-wrap justify-end">
-                        {contact.conv_status && (
-                          <Badge variant={convStatusVariant[contact.conv_status]} className="text-xs">
-                            {convStatusLabel[contact.conv_status]}
-                          </Badge>
-                        )}
-                        <Badge variant="outline" className="text-xs capitalize">{contact.source}</Badge>
-                        {contact.notion_page_id && (
-                          <Badge variant="secondary" className="text-xs">Notion</Badge>
-                        )}
-                        <span className="text-xs text-muted-foreground">
-                          {new Date(contact.created_at).toLocaleDateString('es')}
-                        </span>
-                        {contact.conv_id && (
-                          <Link href={`/conversations/${contact.conv_id}`}>
-                            <Button variant="ghost" size="icon-xs" title="Ver conversación">
-                              <MessageSquare className="h-3 w-3" />
+                    <div key={contact.id} className="py-4">
+                      {editingId === contact.id ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className="text-xs text-muted-foreground font-medium w-20">Teléfono</span>
+                            <span className="text-sm">{contact.phone}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-muted-foreground font-medium w-20">Nombre</label>
+                            <Input
+                              value={editForm.name}
+                              onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))}
+                              className="h-7 text-sm"
+                              placeholder="Nombre"
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-muted-foreground font-medium w-20">Email</label>
+                            <Input
+                              value={editForm.email}
+                              onChange={(e) => setEditForm((f) => ({ ...f, email: e.target.value }))}
+                              className="h-7 text-sm"
+                              placeholder="email@ejemplo.com"
+                            />
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <label className="text-xs text-muted-foreground font-medium w-20">Interés</label>
+                            <Input
+                              value={editForm.interest}
+                              onChange={(e) => setEditForm((f) => ({ ...f, interest: e.target.value }))}
+                              className="h-7 text-sm"
+                              placeholder="¿En qué está interesado?"
+                            />
+                          </div>
+                          <div className="flex gap-2 justify-end mt-2">
+                            <Button variant="outline" size="sm" onClick={() => setEditingId(null)}>
+                              <X className="h-3.5 w-3.5 mr-1" />Cancelar
                             </Button>
-                          </Link>
-                        )}
-                      </div>
+                            <Button size="sm" onClick={() => saveEdit(contact.id)} disabled={saving}>
+                              <Check className="h-3.5 w-3.5 mr-1" />Guardar
+                            </Button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-medium text-sm">{contact.name || 'Sin nombre'}</span>
+                              <span className="text-xs text-muted-foreground">{contact.phone}</span>
+                            </div>
+                            {contact.email && (
+                              <p className="text-xs text-muted-foreground mt-0.5">{contact.email}</p>
+                            )}
+                            {contact.interest && (
+                              <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
+                                Interés: {contact.interest}
+                              </p>
+                            )}
+                            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                              {contact.conv_status && (
+                                <Badge variant={convStatusVariant[contact.conv_status]} className="text-xs">
+                                  {convStatusLabel[contact.conv_status]}
+                                </Badge>
+                              )}
+                              <Badge variant="outline" className="text-xs capitalize">{contact.source}</Badge>
+                              {contact.notion_page_id ? (
+                                <Badge variant="secondary" className="text-xs">Notion ✓</Badge>
+                              ) : (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-5 text-xs px-2"
+                                  onClick={() => pushToNotion(contact.id)}
+                                  disabled={pushingId === contact.id}
+                                >
+                                  <ExternalLink className="h-3 w-3 mr-1" />
+                                  {pushingId === contact.id ? 'Guardando…' : 'Enviar a Notion'}
+                                </Button>
+                              )}
+                              <span className="text-xs text-muted-foreground">
+                                {new Date(contact.created_at).toLocaleDateString('es')}
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0">
+                            {contact.conv_id && (
+                              <Link href={`/conversations/${contact.conv_id}`}>
+                                <Button variant="ghost" size="icon" className="h-8 w-8" title="Ver conversación">
+                                  <MessageSquare className="h-3.5 w-3.5" />
+                                </Button>
+                              </Link>
+                            )}
+                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => startEdit(contact)}>
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8 text-destructive hover:text-destructive"
+                              onClick={() => deleteContact(contact.id)}
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
