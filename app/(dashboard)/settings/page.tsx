@@ -35,7 +35,7 @@ async function saveSettings(formData: FormData) {
     'bot_name', 'tone', 'system_prompt',
     'business_hours_start', 'business_hours_end',
     'escalation_after_turns', 'owner_phone',
-    'notion_kb_db_id', 'notion_conversations_db_id', 'notion_leads_db_id',
+    'notion_kb_db_id', 'notion_conversations_db_id', 'notion_leads_db_id', 'notion_scheduled_db_id',
     'appointment_notification_phone',
   ]
 
@@ -247,6 +247,15 @@ export default function SettingsPage() {
                 id="notion_leads_db_id"
                 name="notion_leads_db_id"
                 defaultValue={settings.notion_leads_db_id}
+                placeholder="ID de la base de datos"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="notion_scheduled_db_id">Mensajes programados</Label>
+              <Input
+                id="notion_scheduled_db_id"
+                name="notion_scheduled_db_id"
+                defaultValue={settings.notion_scheduled_db_id}
                 placeholder="ID de la base de datos"
               />
             </div>

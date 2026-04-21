@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
   scheduled_at DATETIME NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   trigger_job_id TEXT,
+  notion_page_id TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
