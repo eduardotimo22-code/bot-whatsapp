@@ -66,6 +66,7 @@ export interface BotSettings {
   notion_kb_db_id: string
   notion_conversations_db_id: string
   notion_leads_db_id: string
+  notion_scheduled_db_id: string
   owner_phone: string // número del dueño para notificaciones de escalado
   appointment_notification_phone: string // número que recibe notificaciones de citas confirmadas
 }
