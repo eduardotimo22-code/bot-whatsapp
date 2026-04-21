@@ -42,9 +42,11 @@ export function checkEscalation(
   // 3. Max turns check — only count messages from the last 2 hours to avoid
   //    accumulated test messages triggering escalation after a reactivation
   const maxTurns = parseInt(settings.escalation_after_turns || '8', 10)
+  const conv = db.prepare('SELECT turns_reset_at FROM conversations WHERE id = ?').get(conversationId) as { turns_reset_at: string | null } | undefined
+  const resetAt = conv?.turns_reset_at ?? null
   const turnCount = (db.prepare(
-    "SELECT COUNT(*) as c FROM messages WHERE conversation_id = ? AND role = 'user' AND created_at >= datetime('now', '-2 hours')"
-  ).get(conversationId) as { c: number }).c
+    `SELECT COUNT(*) as c FROM messages WHERE conversation_id = ? AND role = 'user' AND created_at >= COALESCE(?, datetime('now', '-2 hours'))`
+  ).get(conversationId, resetAt) as { c: number }).c
 
   if (turnCount >= maxTurns) {
     return { shouldEscalate: true, reason: `max_turns: ${turnCount}` }

@@ -20,6 +20,10 @@ export async function PATCH(request: NextRequest) {
     return NextResponse.json({ error: 'invalid status' }, { status: 400 })
   }
 
-  db.prepare('UPDATE conversations SET status = ? WHERE id = ?').run(status, id)
+  if (status === 'active') {
+    db.prepare('UPDATE conversations SET status = ?, turns_reset_at = CURRENT_TIMESTAMP WHERE id = ?').run(status, id)
+  } else {
+    db.prepare('UPDATE conversations SET status = ? WHERE id = ?').run(status, id)
+  }
   return NextResponse.json({ ok: true })
 }
