@@ -35,7 +35,7 @@ export async function buildContext(conversationId: string, latestMessage: string
   const knowledgeEntries = await queryKnowledgeBase(latestMessage)
   const knowledgeBlock = knowledgeEntries.length > 0
     ? `\n\nINFORMACIÓN RELEVANTE DE LA BASE DE CONOCIMIENTO:\n${knowledgeEntries
-        .map((e) => `[${e.category ? e.category + '] ' : ''}${e.title}\n${e.answer}`)
+        .map((e) => `[${e.category ? e.category + '] ' : ''}${e.question}\n${e.answer}`)
         .join('\n\n')}`
     : ''
 

@@ -10,12 +10,14 @@ import {
   Settings,
   Bot,
   LayoutDashboard,
+  BookOpen,
 } from 'lucide-react'
 
 const navItems = [
   { href: '/', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/conversations', label: 'Conversaciones', icon: MessageSquare },
   { href: '/contacts', label: 'Contactos', icon: Users },
+  { href: '/knowledge', label: 'Base de conocimiento', icon: BookOpen },
   { href: '/scheduler', label: 'Programados', icon: Calendar },
   { href: '/settings', label: 'Configuración', icon: Settings },
 ]

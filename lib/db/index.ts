@@ -24,6 +24,7 @@ export function getDb(): Database.Database {
 
   // Migrations
   try { db.exec("ALTER TABLE scheduled_jobs ADD COLUMN target_name TEXT") } catch { /* already exists */ }
+  try { db.exec("CREATE TABLE IF NOT EXISTS kb_cache (id TEXT PRIMARY KEY, question TEXT NOT NULL, answer TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)") } catch { /* already exists */ }
 
   // Seed default settings if empty
   const count = (db.prepare('SELECT COUNT(*) as c FROM settings').get() as { c: number }).c
