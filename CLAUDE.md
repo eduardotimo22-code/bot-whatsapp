@@ -1,160 +1,131 @@
-# Bot WhatsApp — CLAUDE.md
+# Bot WhatsApp Pizza Juniors Cozumel — CLAUDE.md
 
-## Stack
+## Arquitectura: dos aplicaciones
 
-- **Next.js 16** (App Router) — puerto `3131`
-- **SQLite** via `better-sqlite3` (síncrono, NO async/await)
-- **YCloud** — WhatsApp Business API v2
-- **OpenAI** — GPT-4o para respuestas del bot
-- **Notion** — base de conocimiento, log de conversaciones, leads
-- **PM2** — process manager en Windows (`pm2 restart bot-whatsapp`)
+1. **`worker/` — PRODUCCIÓN.** Cloudflare Worker desplegado en
+   `https://pizza-juniors-bot.eduardo-timo22.workers.dev`. Es el bot real:
+   recibe el webhook de YCloud, responde con GPT-4o-mini, toma pedidos y
+   notifica a los dueños. Base de datos **D1** (`pizza-juniors-bot`), fotos del
+   menú en **KV** (`MENU_IMAGES`, servidas en `/menu/<archivo>.jpg`).
+2. **Raíz — Next.js 16** (puerto `3131`). Dashboard de administración + versión
+   local del bot. Usa **SQLite** (`data/bot.db`, `better-sqlite3` síncrono — NO
+   async/await). OJO: el dashboard lee SQLite local, NO la D1 de producción.
 
-## Arrancar el servidor
+Hay lógica duplicada entre `lib/` (Next) y `worker/src/`. **La fuente de verdad
+del comportamiento del bot es `worker/src/`** — cualquier fix de bot va ahí
+primero.
+
+## Comandos del worker (desde `worker/`)
 
 ```bash
-pm2 start ecosystem.config.js   # primera vez
-pm2 restart bot-whatsapp        # para aplicar cambios
-pm2 logs bot-whatsapp           # ver logs en tiempo real
-pm2 status                      # estado
+npm run type-check        # tsc --noEmit
+npm run deploy            # wrangler deploy a producción
+npx wrangler tail         # logs de producción en vivo
+npm run db:migrate        # aplicar schema.sql a D1 remota
+npx wrangler d1 execute pizza-juniors-bot --command "SELECT ..."   # consultar D1
+npx wrangler secret put NOMBRE   # setear secrets de producción
 ```
 
-El servidor corre en `http://localhost:3131`. Para exponer el webhook usa ngrok:
+Secrets del worker (via `wrangler secret put`; en local van en `worker/.dev.vars`):
+`OPENAI_API_KEY`, `YCLOUD_API_KEY`, `YCLOUD_PHONE_NUMBER`,
+`GOOGLE_SHEETS_CLIENT_EMAIL`, `GOOGLE_SHEETS_PRIVATE_KEY`,
+`GOOGLE_SHEETS_SPREADSHEET_ID`, `YCLOUD_WEBHOOK_SECRET` (opcional),
+`ORDERS_API_KEY` (opcional, protege `/sync-kb`).
+
+## App Next.js local
+
 ```bash
-./ngrok http 3131
-```
-La URL del webhook se configura en el panel de YCloud apuntando a `https://<ngrok-url>/api/webhook`.
-
-## Variables de entorno
-
-El archivo es `.env` (NO `.env.local`).
-
-```
-YCLOUD_API_KEY=...
-YCLOUD_PHONE_NUMBER=+529878005982   # número sin normalizar
-OPENAI_API_KEY=...
-NOTION_API_KEY=...
-# Los Notion DB IDs NO se leen del .env — van en /settings (SQLite)
+npm run dev               # next dev -p 3131
+pm2 restart bot-whatsapp  # si corre bajo PM2
 ```
 
-## Base de datos SQLite
+Variables en `.env` (NO `.env.local`): `YCLOUD_API_KEY`, `YCLOUD_PHONE_NUMBER`,
+`OPENAI_API_KEY`, `GOOGLE_SHEETS_*`, `ORDERS_API_KEY`.
 
-Ruta: `data/bot.db`
-
-Tablas: `conversations`, `messages`, `contacts`, `scheduled_jobs`, `settings`
-
-**Las settings se leen siempre de SQLite**, no del `.env`. Los campos importantes:
-- `notion_kb_db_id`, `notion_conversations_db_id`, `notion_leads_db_id` — IDs de Notion
-- `owner_phone` — recibe alertas de escalado
-- `appointment_notification_phone` — recibe notificaciones de citas confirmadas
-- `business_hours_start/end`, `business_days` — horario de atención
-- `escalation_keywords` — JSON array de frases que fuerzan escalado
-- `escalation_after_turns` — máximo de turnos antes de escalar
-
-Para inspeccionar la DB:
-```bash
-node -e "const db = require('better-sqlite3')('data/bot.db'); console.log(db.prepare('SELECT key, value FROM settings').all())"
-```
-
-## Arquitectura del flujo de mensajes
+## Flujo de mensajes (worker)
 
 ```
-WhatsApp → YCloud → POST /api/webhook
-  → verifyYCloudSignature (lib/ycloud/webhook.ts)
-  → processIncomingMessage (guarda en SQLite)
-  → processMessage (lib/ai/processor.ts)
-      → buildContext (historial + Notion KB + settings)
-      → GPT-4o
-      → detecta [CITA_CONFIRMADA:...] → notifica por WhatsApp
-      → checkEscalation → si escala: notifica owner + log Notion
-      → sendTextMessage → YCloud → cliente
-      → detectLeadSignals → saveLeadToNotion
+WhatsApp → YCloud → POST /webhook (o /api/webhook)
+  → verifyYCloudSignature (ycloud-signature o Svix)
+  → getOrCreateConversation + saveUserMessage (dedupe atómico por ycloud_message_id)
+  → comandos de owner: PAUSA <tel> / ACTIVAR <tel>
+  → fuera de horario → mensaje de "estamos cerrados" (1 vez/día) + marca para follow-up
+  → "menú" explícito → manda las fotos desde KV sin llamar a GPT
+  → processMessage: buildContext (historial + kb_cache + menú Sheets) → gpt-4o-mini
+      → [PEDIDO_CONFIRMADO: items=..., total=..., tipo=..., pago=...]
+        → saveOrder + notifyOwners; si pago=transferencia manda imagen con datos bancarios
+      → checkEscalation (keywords / turnos) → escala + notifica owners
+      → sendTextMessage al cliente
 ```
 
-## Normalización de teléfonos
+Horario (en `worker/src/hours.ts`, hardcodeado): jueves a martes 17:00–23:40,
+miércoles cerrado. Cancún es UTC-5 fijo (sin horario de verano).
 
-YCloud requiere números **sin `+`**. Siempre usar `normalizePhone()` antes de guardar en DB o enviar a YCloud. Los IDs de conversación son el número normalizado (sin `+`).
+## Notificaciones a owners — SIEMPRE por template
 
-```ts
-function normalizePhone(phone: string): string {
-  return phone.startsWith('+') ? phone.slice(1) : phone
-}
-```
+`notifyOwners()` en `worker/src/notify.ts` es el ÚNICO camino para notificar a
+dueños (pedidos confirmados, reporte diario, aviso de turno). Envía el template
+de WhatsApp `owner_notification` (es_MX, categoría UTILITY) — los templates se
+entregan aunque la ventana de 24h del owner esté cerrada; los mensajes de texto
+libres NO (fallan asíncronamente con error 131047, un try/catch no lo ve).
+Fallback a texto libre solo si el template falla síncronamente (no aprobado).
 
-## Verificación de firma YCloud
+- El contenido va aplanado en 1 variable de body (sin `\n`, máx ~900 chars) —
+  `flattenForTemplate()`.
+- Crear/consultar el template: `node scripts/create-owner-template.mjs [status]`.
+- Settings: `owner_template_name` (default `owner_notification`),
+  `owner_template_lang` (default `es_MX`).
 
-YCloud usa Svix. El secret tiene prefijo `whsec_`. Si `YCLOUD_WEBHOOK_SECRET` no está en `.env`, la verificación se omite (útil para desarrollo). En producción debe estar activo.
+## Crons del worker (UTC; Cancún = UTC-5)
 
-## Estructura de archivos clave
+- `0 * * * *` — sync de KB desde Google Sheets a `kb_cache`
+- `0 22 * * *` (17:00 Cancún) — follow-up de apertura a clientes que escribieron
+  fuera de horario + aviso de turno a owners (salta miércoles)
+- `41 4 * * *` (23:41 Cancún) — reporte diario de ventas a owners
 
-```
-app/
-  (dashboard)/
-    page.tsx                    — Dashboard con stats
-    conversations/              — Lista y vista de conversaciones
-    contacts/                   — Contactos/leads
-    scheduler/                  — Mensajes programados
-    settings/                   — Configuración del bot
-  api/
-    webhook/route.ts            — Recibe eventos de YCloud
-    groups/route.ts             — Lista grupos de WhatsApp
-    scheduler/route.ts          — CRUD de jobs programados
-    scheduler/run/route.ts      — Ejecutar scheduler manualmente
-    stats/route.ts              — Stats para polling del dashboard
-    conversations/[id]/messages/route.ts — Polling de mensajes
+## Google Sheets (reemplazó a Notion)
 
-lib/
-  ai/
-    processor.ts                — Pipeline principal: GPT + envío + leads + citas
-    context-builder.ts          — Construye el system prompt con settings + Notion KB
-    escalation.ts               — Lógica de escalado al humano
-  ycloud/
-    client.ts                   — HTTP client base
-    sender.ts                   — sendTextMessage, sendGroupMessage, sendTemplateMessage
-    groups.ts                   — listWhatsAppGroups
-    webhook.ts                  — Verificación de firma Svix
-  notion/
-    client.ts                   — Cliente Notion (lee NOTION_API_KEY del env)
-    knowledge.ts                — queryKnowledgeBase (busca por keywords)
-    conversations.ts            — logConversationToNotion
-    leads.ts                    — saveLeadToNotion, detectLeadSignals
-  db/
-    index.ts                    — getDb() singleton + migraciones inline
-    schema.sql                  — Schema completo
-  scheduler/
-    jobs.ts                     — processPendingJobs()
+Spreadsheet con service account JWT (scope readonly):
+- Pestaña **`Conocimiento`** (`A2:D`): Pregunta | Respuesta | Categoría → tabla `kb_cache`
+- Pestaña **`Menu`** (`A2:E`): Categoría | Producto | Descripción | Precio | Disponible
+  → se inyecta al system prompt (caché 10 min en la app Next; sync horario en worker)
 
-types/index.ts                  — Tipos globales (Conversation, Message, BotSettings, etc.)
-```
+Sync manual: `POST /sync-kb` en el worker (header `x-api-key`) o
+`node scripts/force-sync.mjs` para el SQLite local.
 
-## Flujo de citas confirmadas
+## Pedidos desde el sitio web
 
-El system prompt instruye al bot para que cuando confirme una cita incluya al final de su respuesta:
-```
-[CITA_CONFIRMADA: nombre=X, fecha=Y, hora=Z, servicio=W]
-```
-El procesador extrae ese tag, lo elimina del mensaje antes de enviarlo al cliente, y manda un WhatsApp al `appointment_notification_phone` configurado en settings.
+`POST /api/orders` (app Next.js, header `x-api-key` = `ORDERS_API_KEY`): guarda
+en `orders`, confirma al cliente por WhatsApp y notifica al owner. Los mensajes
+del sitio que llegan por WhatsApp con formato `💰 Total:` / `📋 Mis datos:` los
+reconoce el worker (`isWebsiteOrder`) y nunca escalan.
 
-## Scheduler de mensajes programados
+## Settings (tabla `settings`, clave/valor)
 
-- Target types: `contact` (número individual), `group` (grupo WhatsApp por JID), `broadcast` (todos los contactos)
-- Los grupos se obtienen de YCloud via `GET /api/groups`
-- Para enviar a grupos el número debe ser administrador del grupo
-- El scheduler se ejecuta manualmente con el botón en `/scheduler` o via `POST /api/scheduler/run`
-
-## Notion — estructura de las bases de datos
-
-**Base de Conocimiento** (`notion_kb_db_id`):
-- `Pregunta` (title), `Respuesta` (rich_text), `Categoría` (select), `Activo` (checkbox)
-
-**Conversaciones** (`notion_conversations_db_id`):
-- `Contacto` (title), `Teléfono` (rich_text), `Resumen` (rich_text), `Turnos` (number), `Estado` (select), `Fecha` (date)
-
-**Leads** (`notion_leads_db_id`):
-- `Nombre` (title), `Teléfono` (rich_text), `Email` (email), `Interés` (rich_text), `Fuente` (select), `Fecha` (date)
+Se leen de la DB (D1 en worker, SQLite en Next), NO del `.env`. En el worker
+`getSettings()` hace merge sobre `SETTINGS_DEFAULTS` (worker/src/db.ts) — los
+settings nuevos del código aparecen aunque la tabla ya esté poblada.
+Claves importantes: `system_prompt`, `owner_phones` (JSON array),
+`no_escalate_phones` (JSON array, nunca escalan), `escalation_keywords`,
+`escalation_after_turns`, `owner_template_name`, `owner_template_lang`.
 
 ## Convenciones
 
-- SQLite es síncrono — no uses `async/await` con `better-sqlite3`
-- Los Server Components leen DB directamente; los Client Components usan fetch a API routes
-- El polling en el frontend usa `setInterval` con `useCallback` (no SWR)
-- `nanoid()` para todos los IDs
+- Teléfonos SIEMPRE con `normalizePhone()` (sin `+`); el ID de conversación es
+  el número normalizado.
+- SQLite (`better-sqlite3`) es síncrono; D1 es async.
+- `nanoid()` para IDs en la app Next; `crypto.randomUUID()` en el worker.
+- Server Components leen la DB directo; Client Components hacen fetch a API
+  routes con polling `setInterval`.
+- La memoria conversacional se resetea tras 24h sin actividad
+  (`turns_reset_at`); las conversaciones escaladas se reactivan solas a las 24h.
+- NO commitear: `datos bancarios de transferencia 1/`, `dev*.log`, `ngrok.exe`,
+  `worker/.dev.vars` (ya en .gitignore). `worker/.dev.vars.example` debe llevar
+  solo placeholders, nunca keys reales.
+
+## Verificación de cambios del bot
+
+```bash
+cd worker && npm run type-check && npm run deploy
+npx wrangler tail   # y mandar un mensaje de prueba por WhatsApp
+```
