@@ -25,7 +25,6 @@ CREATE TABLE IF NOT EXISTS contacts (
   name TEXT,
   email TEXT,
   interest TEXT,
-  notion_page_id TEXT,
   source TEXT NOT NULL DEFAULT 'whatsapp',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -39,7 +38,18 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
   scheduled_at DATETIME NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   trigger_job_id TEXT,
-  notion_page_id TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+  id TEXT PRIMARY KEY,
+  conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  items TEXT NOT NULL,
+  total REAL,
+  source TEXT NOT NULL DEFAULT 'whatsapp',
+  status TEXT NOT NULL DEFAULT 'pending',
+  delivery_type TEXT,
+  address TEXT,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

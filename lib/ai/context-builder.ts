@@ -1,5 +1,5 @@
 import { getDb } from '@/lib/db'
-import { queryKnowledgeBase } from '@/lib/notion/knowledge'
+import { queryKnowledgeBase } from '@/lib/sheets/knowledge'
 import type { BotSettings, Message } from '@/types'
 
 export interface AiContext {
@@ -51,11 +51,18 @@ export async function buildContext(conversationId: string, latestMessage: string
     `Horario de atención: ${settings.business_hours_start} - ${settings.business_hours_end}`,
     `Hora actual: ${timeStr} (${dayStr})`,
     knowledgeBlock,
-    '\nSi no tienes información suficiente para responder con precisión, indica que vas a escalar la consulta al equipo humano.',
+    '\nIMPORTANTE — PRECIOS: NUNCA inventes ni estimes precios, ingredientes ni disponibilidad. Usa ÚNICAMENTE los datos del menú y la base de conocimiento. Si no tienes el dato exacto, di: "No tengo ese dato, déjame verificarlo con el equipo."',
+    'Si no tienes información suficiente para responder con precisión, indica que vas a escalar la consulta al equipo humano.',
     'Responde siempre en el mismo idioma que el cliente.',
-    '\nCUANDO CONFIRMES UNA CITA: al final de tu respuesta agrega exactamente esta línea (sin mostrarla al cliente, es para el sistema):',
-    '[CITA_CONFIRMADA: nombre={nombre_cliente}, fecha={fecha}, hora={hora}, servicio={servicio_o_motivo}]',
-    'Solo incluye esa línea cuando el cliente haya confirmado explícitamente una cita con fecha y hora.',
+    '\nIMPORTANTE — PEDIDO CONFIRMADO (esta instrucción anula cualquier formato de tag mencionado antes):',
+    'Cuando el cliente confirme su pedido, incluye al FINAL de tu respuesta esta línea exacta (invisible para el cliente):',
+    '[PEDIDO_CONFIRMADO: nombre=NOMBRE, items=LISTA, total=NUMERO, tipo=entrega|recoger, pago=efectivo|tarjeta|transferencia]',
+    'Reglas estrictas — sustituye CADA campo con el valor real, NUNCA dejes llaves {} ni mayúsculas de plantilla:',
+    '- nombre: nombre real del cliente tal como lo proporcionó',
+    '- items: "1x Pizza Hawaiana Mediana | 1x Refresco". NUNCA uses {} ni comas para separar items.',
+    '- total: suma exacta de precios del menú. OBLIGATORIO, nunca vacío ni entre llaves.',
+    '- tipo: exactamente "entrega" o "recoger"',
+    '- pago: exactamente "efectivo", "tarjeta" o "transferencia"',
   ].join('\n')
 
   return { systemPrompt, history, latestMessage }

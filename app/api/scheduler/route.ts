@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getDb } from '@/lib/db'
 import { nanoid } from 'nanoid'
-import { pushJobToNotion, archiveJobInNotion } from '@/lib/notion/scheduler'
 import type { ScheduledJob } from '@/types'
 
 export async function GET() {
@@ -27,17 +26,12 @@ export async function POST(request: NextRequest) {
   `).run(id, body.target_type, body.target_id, body.target_name ?? null, body.message, body.scheduled_at)
 
   const job = db.prepare('SELECT * FROM scheduled_jobs WHERE id = ?').get(id) as ScheduledJob
-  pushJobToNotion(job).catch(() => {})
-
-  return NextResponse.json({ id })
+  return NextResponse.json({ id: job.id })
 }
 
 export async function DELETE(request: NextRequest) {
   const db = getDb()
   const { id } = await request.json() as { id: string }
-
-  archiveJobInNotion(id).catch(() => {})
   db.prepare("DELETE FROM scheduled_jobs WHERE id = ? AND status = 'pending'").run(id)
-
   return NextResponse.json({ ok: true })
 }

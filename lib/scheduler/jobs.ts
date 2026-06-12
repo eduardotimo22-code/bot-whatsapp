@@ -1,6 +1,5 @@
 import { getDb } from '@/lib/db'
 import { sendTextMessage, sendGroupMessage } from '@/lib/ycloud/sender'
-import { updateJobStatusInNotion } from '@/lib/notion/scheduler'
 import type { ScheduledJob } from '@/types'
 
 /**
@@ -33,12 +32,10 @@ export async function processPendingJobs(): Promise<{ sent: number; failed: numb
       }
 
       db.prepare("UPDATE scheduled_jobs SET status = 'sent' WHERE id = ?").run(job.id)
-      updateJobStatusInNotion(job.id, 'sent').catch(() => {})
       sent++
     } catch (err) {
       console.error(`[scheduler] Job ${job.id} failed:`, err)
       db.prepare("UPDATE scheduled_jobs SET status = 'failed' WHERE id = ?").run(job.id)
-      updateJobStatusInNotion(job.id, 'failed').catch(() => {})
       failed++
     }
   }

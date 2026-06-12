@@ -31,7 +31,6 @@ export interface Contact {
   name: string | null
   email: string | null
   interest: string | null
-  notion_page_id: string | null
   source: string
   created_at: string
 }
@@ -63,12 +62,22 @@ export interface BotSettings {
   business_days: string // JSON array: ["Mon","Tue","Wed","Thu","Fri"]
   escalation_keywords: string // JSON array
   escalation_after_turns: string
-  notion_kb_db_id: string
-  notion_conversations_db_id: string
-  notion_leads_db_id: string
-  notion_scheduled_db_id: string
+  google_spreadsheet_id: string
+  orders_api_key: string
   owner_phone: string // número del dueño para notificaciones de escalado
   appointment_notification_phone: string // número que recibe notificaciones de citas confirmadas
+}
+
+export interface Order {
+  id: string
+  conversation_id: string
+  items: string // JSON string
+  total: number | null
+  source: 'whatsapp' | 'website'
+  status: 'pending' | 'confirmed' | 'cancelled'
+  delivery_type: 'delivery' | 'pickup' | null
+  address: string | null
+  created_at: string
 }
 
 // YCloud webhook event (v2 format)

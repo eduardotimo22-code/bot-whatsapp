@@ -3,8 +3,7 @@ import { getDb } from '@/lib/db'
 import { buildContext } from './context-builder'
 import { checkEscalation, buildEscalationMessages } from './escalation'
 import { sendTextMessage } from '@/lib/ycloud/sender'
-import { logConversationToNotion, buildConversationSummary } from '@/lib/notion/conversations'
-import { detectLeadSignals, saveLeadToNotion } from '@/lib/notion/leads'
+import { getMenuText } from '@/lib/sheets/menu'
 import { nanoid } from 'nanoid'
 import type { Message, BotSettings } from '@/types'
 
@@ -18,14 +17,21 @@ function getOpenAI(): OpenAI {
   return openaiClient
 }
 
-/**
- * Main AI processing pipeline for an incoming message.
- * Runs after the message has been saved to SQLite.
- */
+const MENU_TRIGGERS = [
+  'menú', 'menu', 'carta', 'que tienen', 'qué tienen', 'que pizzas', 'qué pizzas',
+  'que hay', 'qué hay', 'que venden', 'qué venden', 'ver el menu', 'ver el menú',
+  'envíame el menu', 'mándame el menu', 'quiero ver', 'opciones', 'what do you have',
+  'what\'s the menu', 'show menu',
+]
+
+function isMenuRequest(message: string): boolean {
+  const lower = message.toLowerCase()
+  return MENU_TRIGGERS.some((trigger) => lower.includes(trigger))
+}
+
 export async function processMessage(conversationId: string): Promise<void> {
   const db = getDb()
 
-  // Get the latest user message
   const latest = db.prepare(`
     SELECT content FROM messages
     WHERE conversation_id = ? AND role = 'user'
@@ -36,9 +42,28 @@ export async function processMessage(conversationId: string): Promise<void> {
 
   const latestMessage = latest.content
 
-  // Load settings
   const settingsRows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[]
   const settings = Object.fromEntries(settingsRows.map((r) => [r.key, r.value])) as unknown as BotSettings
+
+  // Shortcut: if the client is asking for the menu, send it directly without GPT
+  if (isMenuRequest(latestMessage)) {
+    const conv = db.prepare('SELECT phone FROM conversations WHERE id = ?').get(conversationId) as { phone: string } | undefined
+    if (conv) {
+      try {
+        const menuText = await getMenuText()
+        await sendTextMessage(conv.phone, menuText)
+        db.prepare(`
+          INSERT INTO messages (id, conversation_id, role, content)
+          VALUES (?, ?, 'assistant', ?)
+        `).run(nanoid(), conversationId, menuText)
+        db.prepare('UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = ?').run(conversationId)
+        console.log(`[processor] Sent menu to ${conv.phone}`)
+      } catch (err) {
+        console.error('[processor] Menu send error:', err)
+      }
+    }
+    return
+  }
 
   // Build full context (history + knowledge base + settings)
   const context = await buildContext(conversationId, latestMessage)
@@ -54,7 +79,7 @@ export async function processMessage(conversationId: string): Promise<void> {
         ...context.history,
         { role: 'user', content: context.latestMessage },
       ],
-      max_tokens: 500,
+      max_tokens: 600,
       temperature: 0.4,
     })
     aiResponse = completion.choices[0]?.message?.content ?? 'Lo siento, no pude procesar tu mensaje.'
@@ -63,29 +88,27 @@ export async function processMessage(conversationId: string): Promise<void> {
     aiResponse = 'En este momento tenemos dificultades técnicas. Por favor, inténtalo de nuevo en unos minutos.'
   }
 
-  // Extract and strip appointment confirmation tag before sending to client
-  const appointmentMatch = aiResponse.match(/\[CITA_CONFIRMADA:[^\]]+\]/)
-  const cleanResponse = aiResponse.replace(/\[CITA_CONFIRMADA:[^\]]+\]\s*/g, '').trim()
+  // Extract order confirmation tag before sending to client
+  const orderMatch = aiResponse.match(/\[PEDIDO_CONFIRMADO:[^\]]+\]/)
+  const cleanResponse = aiResponse.replace(/\[PEDIDO_CONFIRMADO:[^\]]+\]\s*/g, '').trim()
 
-  console.log(`[processor] AI response (${conversationId}): "${cleanResponse.slice(0, 120)}" | tag: ${!!appointmentMatch}`)
+  console.log(`[processor] AI response (${conversationId}): "${cleanResponse.slice(0, 120)}" | order: ${!!orderMatch}`)
 
-  // If the AI confirmed an appointment, skip escalation — it handled the conversation successfully
-  if (!appointmentMatch) {
+  // Skip escalation check when an order was just confirmed
+  if (!orderMatch) {
     const escalation = checkEscalation(conversationId, latestMessage, cleanResponse)
-    console.log(`[processor] Escalation check: ${JSON.stringify(escalation)}`)
     if (escalation.shouldEscalate) {
-      await handleEscalation(conversationId, escalation.reason)
+      await handleEscalation(conversationId, escalation.reason, settings)
       return
     }
   }
 
-  // Save AI response to SQLite (clean, without the tag)
+  // Save AI response to SQLite
   db.prepare(`
     INSERT INTO messages (id, conversation_id, role, content)
     VALUES (?, ?, 'assistant', ?)
   `).run(nanoid(), conversationId, cleanResponse)
 
-  // Get conversation phone to send the reply
   const conv = db.prepare('SELECT phone, contact_name FROM conversations WHERE id = ?').get(conversationId) as
     | { phone: string; contact_name: string | null }
     | undefined
@@ -97,44 +120,63 @@ export async function processMessage(conversationId: string): Promise<void> {
       console.error('[processor] Send error:', err)
     }
 
-    // Send appointment notification if confirmed
-    if (appointmentMatch) {
-      await notifyAppointment(appointmentMatch[0], conv.contact_name ?? conv.phone, conv.phone, settings)
-    }
-
-    // Detect and save leads
-    const leadSignals = detectLeadSignals(latestMessage)
-    if (leadSignals) {
-      const contact = db.prepare('SELECT id, notion_page_id FROM contacts WHERE phone = ?').get(conv.phone) as
-        | { id: string; notion_page_id: string | null }
-        | undefined
-
-      if (contact) {
-        // Update email if detected
-        if (leadSignals.email) {
-          db.prepare('UPDATE contacts SET email = ? WHERE id = ? AND email IS NULL').run(leadSignals.email, contact.id)
-          db.prepare('UPDATE contacts SET interest = ? WHERE id = ? AND interest IS NULL').run(leadSignals.interest, contact.id)
-        }
-
-        await saveLeadToNotion({
-          phone: conv.phone,
-          name: conv.contact_name,
-          email: leadSignals.email,
-          interest: leadSignals.interest,
-          contactId: contact.id,
-        })
-      }
+    // Save confirmed order to DB and notify owner
+    if (orderMatch) {
+      await handleOrderConfirmation(orderMatch[0], conversationId, conv.contact_name ?? conv.phone, conv.phone, settings)
     }
   }
 
-  // Update conversation timestamp
   db.prepare('UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP WHERE id = ?').run(conversationId)
 }
 
-async function handleEscalation(conversationId: string, reason: string | null): Promise<void> {
+async function handleOrderConfirmation(
+  tag: string,
+  conversationId: string,
+  contactName: string,
+  contactPhone: string,
+  settings: BotSettings
+): Promise<void> {
   const db = getDb()
 
-  // Mark conversation as escalated
+  const getField = (key: string) => tag.match(new RegExp(`${key}=([^,\\]]+)`))?.[1]?.trim() ?? ''
+  const nombre = getField('nombre')
+  const items = tag.match(/items=([\s\S]+?),\s*total=/)?.[1]?.trim() ?? getField('items')
+  const total = getField('total')
+  const tipo = getField('tipo')
+  const pago = getField('pago')
+
+  // Save order to SQLite
+  try {
+    db.prepare(`
+      INSERT INTO orders (id, conversation_id, items, total, source, status, delivery_type)
+      VALUES (?, ?, ?, ?, 'whatsapp', 'confirmed', ?)
+    `).run(nanoid(), conversationId, items, parseFloat(total) || null, tipo || null)
+  } catch (err) {
+    console.error('[processor] Order DB insert error:', err)
+  }
+
+  // Notify owner
+  if (settings.owner_phone) {
+    const msg = [
+      `🍕 *Nuevo pedido confirmado*`,
+      `👤 Cliente: ${nombre || contactName} (${contactPhone})`,
+      `📋 Items: ${items}`,
+      total && `💰 Total: $${total}`,
+      tipo && `🚗 Tipo: ${tipo}`,
+      pago && `💳 Pago: ${pago}`,
+    ].filter(Boolean).join('\n')
+
+    try {
+      await sendTextMessage(settings.owner_phone, msg)
+    } catch (err) {
+      console.error('[processor] Order notify error:', err)
+    }
+  }
+}
+
+async function handleEscalation(conversationId: string, reason: string | null, settings: BotSettings): Promise<void> {
+  const db = getDb()
+
   db.prepare("UPDATE conversations SET status = 'escalated' WHERE id = ?").run(conversationId)
 
   const conv = db.prepare('SELECT phone, contact_name FROM conversations WHERE id = ?').get(conversationId) as
@@ -145,7 +187,6 @@ async function handleEscalation(conversationId: string, reason: string | null): 
 
   const msgs = buildEscalationMessages(reason)
 
-  // Notify the user
   try {
     await sendTextMessage(conv.phone, msgs.toUser)
     db.prepare(`
@@ -156,10 +197,6 @@ async function handleEscalation(conversationId: string, reason: string | null): 
     console.error('[processor] Escalation user notify error:', err)
   }
 
-  // Notify the owner
-  const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[]
-  const settings = Object.fromEntries(rows.map((r) => [r.key, r.value])) as unknown as BotSettings
-
   if (settings.owner_phone) {
     const recentMessages = db.prepare(`
       SELECT role, content FROM messages
@@ -167,7 +204,11 @@ async function handleEscalation(conversationId: string, reason: string | null): 
       ORDER BY created_at DESC LIMIT 6
     `).all(conversationId) as Pick<Message, 'role' | 'content'>[]
 
-    const summary = buildConversationSummary(recentMessages.reverse())
+    const summary = recentMessages
+      .reverse()
+      .map((m) => `${m.role === 'user' ? '👤' : '🤖'} ${m.content}`)
+      .join('\n')
+
     const ownerMsg = msgs.toOwner(conv.contact_name ?? 'Sin nombre', conv.phone, summary)
 
     try {
@@ -175,52 +216,5 @@ async function handleEscalation(conversationId: string, reason: string | null): 
     } catch (err) {
       console.error('[processor] Owner notify error:', err)
     }
-  }
-
-  // Log to Notion
-  const allMessages = db.prepare(`
-    SELECT role, content, created_at FROM messages WHERE conversation_id = ?
-    ORDER BY created_at ASC
-  `).all(conversationId) as Message[]
-
-  await logConversationToNotion({
-    contactName: conv.contact_name ?? '',
-    phone: conv.phone,
-    summary: buildConversationSummary(allMessages),
-    turnCount: allMessages.filter((m) => m.role === 'user').length,
-    status: 'escalated',
-    conversationId,
-  })
-}
-
-async function notifyAppointment(
-  tag: string,
-  contactName: string,
-  contactPhone: string,
-  settings: BotSettings
-): Promise<void> {
-  const notifyPhone = settings.appointment_notification_phone
-  if (!notifyPhone) return
-
-  // Parse tag: [CITA_CONFIRMADA: nombre=X, fecha=Y, hora=Z, servicio=W]
-  const get = (key: string) => tag.match(new RegExp(`${key}=([^,\\]]+)`))?.[1]?.trim() ?? ''
-
-  const nombre = get('nombre') || contactName
-  const fecha = get('fecha')
-  const hora = get('hora')
-  const servicio = get('servicio')
-
-  const msg = [
-    `📅 *Nueva cita confirmada*`,
-    `👤 Cliente: ${nombre} (${contactPhone})`,
-    fecha && `📆 Fecha: ${fecha}`,
-    hora && `🕐 Hora: ${hora}`,
-    servicio && `💼 Motivo: ${servicio}`,
-  ].filter(Boolean).join('\n')
-
-  try {
-    await sendTextMessage(notifyPhone, msg)
-  } catch (err) {
-    console.error('[processor] Appointment notify error:', err)
   }
 }

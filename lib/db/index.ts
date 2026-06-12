@@ -25,8 +25,16 @@ export function getDb(): Database.Database {
   // Migrations
   try { db.exec("ALTER TABLE scheduled_jobs ADD COLUMN target_name TEXT") } catch { /* already exists */ }
   try { db.exec("CREATE TABLE IF NOT EXISTS kb_cache (id TEXT PRIMARY KEY, question TEXT NOT NULL, answer TEXT NOT NULL, category TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1, synced_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)") } catch { /* already exists */ }
-  try { db.exec("ALTER TABLE scheduled_jobs ADD COLUMN notion_page_id TEXT") } catch { /* already exists */ }
   try { db.exec("ALTER TABLE conversations ADD COLUMN turns_reset_at DATETIME") } catch { /* already exists */ }
+  try { db.exec("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, items TEXT NOT NULL, total REAL, source TEXT NOT NULL DEFAULT 'whatsapp', status TEXT NOT NULL DEFAULT 'pending', delivery_type TEXT, address TEXT, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)") } catch { /* already exists */ }
+  // Remove old conflicting [PEDIDO_CONFIRMADO] tag format from system_prompt setting
+  try {
+    const sp = db.prepare("SELECT value FROM settings WHERE key = 'system_prompt'").get() as { value: string } | undefined
+    if (sp?.value?.includes('[PEDIDO_CONFIRMADO: items={')) {
+      const cleaned = sp.value.replace(/\n?- Cuando el cliente confirme un pedido[\s\S]*?\[PEDIDO_CONFIRMADO[^\]]+\]/g, '').trim()
+      db.prepare("UPDATE settings SET value = ? WHERE key = 'system_prompt'").run(cleaned)
+    }
+  } catch { /* ignore */ }
 
   // Seed default settings if empty
   const count = (db.prepare('SELECT COUNT(*) as c FROM settings').get() as { c: number }).c
@@ -41,18 +49,27 @@ function seedDefaults(db: Database.Database) {
   const insert = db.prepare('INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)')
 
   const defaults: [string, string][] = [
-    ['bot_name', 'Asistente'],
-    ['tone', 'profesional y amable'],
-    ['system_prompt', 'Eres un asistente de atención al cliente. Responde de forma clara y concisa basándote en la información disponible. Si no sabes algo, sé honesto y ofrece escalar al equipo humano.'],
-    ['business_hours_start', '09:00'],
-    ['business_hours_end', '18:00'],
-    ['business_days', JSON.stringify(['Mon', 'Tue', 'Wed', 'Thu', 'Fri'])],
-    ['escalation_keywords', JSON.stringify(['hablar con alguien', 'hablar con una persona', 'agente', 'urgente', 'problema grave', 'queja'])],
-    ['escalation_after_turns', '8'],
-    ['notion_kb_db_id', ''],
-    ['notion_conversations_db_id', ''],
-    ['notion_leads_db_id', ''],
-    ['notion_scheduled_db_id', ''],
+    ['bot_name', 'Junior'],
+    ['tone', 'amigable, rápido y entusiasta con la comida'],
+    ['system_prompt', `Eres Junior, el asistente virtual de Pizza Juniors Cozumel. Eres amigable, rápido y entusiasmado con la comida.
+
+REGLAS:
+- Responde siempre en español (salvo que el cliente hable inglés)
+- Cuando el cliente pida el menú, dile que lo estás enviando y usa el flujo de menú automático
+- Para hacer un pedido: guía al cliente item por item, confirma el total y pregunta si es para entrega o recoger
+- Cuando el cliente confirme un pedido con SÍ, incluye al final de tu respuesta: [PEDIDO_CONFIRMADO: items={lista de items}, total={total}, tipo={entrega/recoger}]
+- Horario: Lunes a Sábado 11am-11pm, Domingo 12pm-10pm (hora de Cozumel)
+- Tiempo de entrega: 30-45 minutos
+- Entrega a domicilio disponible en Cozumel
+- Si el cliente tiene una queja o problema serio, escala inmediatamente al manager
+- Si no sabes algo, dí: "Déjame preguntar al equipo y te aviso en un momento"`],
+    ['business_hours_start', '11:00'],
+    ['business_hours_end', '23:00'],
+    ['business_days', JSON.stringify(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])],
+    ['escalation_keywords', JSON.stringify(['hablar con alguien', 'hablar con una persona', 'queja', 'devolución', 'muy tarde', 'llegó mal', 'problema grave'])],
+    ['escalation_after_turns', '10'],
+    ['google_spreadsheet_id', ''],
+    ['orders_api_key', ''],
     ['owner_phone', ''],
     ['appointment_notification_phone', ''],
   ]

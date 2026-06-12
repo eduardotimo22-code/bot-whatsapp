@@ -1,0 +1,7 @@
+const Database = require('../node_modules/better-sqlite3')
+const db = new Database('./data/bot.db')
+const count = db.prepare('SELECT COUNT(*) as c FROM kb_cache').get()
+console.log('kb_cache entries:', count.c)
+const rows = db.prepare('SELECT question, category FROM kb_cache LIMIT 5').all()
+rows.forEach(r => console.log(' -', r.question.substring(0, 60), '|', r.category))
+db.close()

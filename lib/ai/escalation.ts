@@ -18,12 +18,24 @@ export function checkEscalation(
   const rows = db.prepare('SELECT key, value FROM settings').all() as { key: string; value: string }[]
   const settings = Object.fromEntries(rows.map((r) => [r.key, r.value])) as unknown as BotSettings
 
-  // 1. Keyword check in user message
+  // 1. Keyword check in user message — skip if bot was collecting address/delivery info
   const keywords: string[] = JSON.parse(settings.escalation_keywords || '[]')
   const msgLower = latestMessage.toLowerCase()
-  const triggeredKeyword = keywords.find((kw) => msgLower.includes(kw.toLowerCase()))
-  if (triggeredKeyword) {
-    return { shouldEscalate: true, reason: `keyword: "${triggeredKeyword}"` }
+
+  const lastBotMsg = db.prepare(
+    `SELECT content FROM messages WHERE conversation_id = ? AND role = 'assistant'
+     ORDER BY created_at DESC LIMIT 1`
+  ).get(conversationId) as { content: string } | undefined
+
+  const addressPhrases = ['dirección', 'domicilio', 'nombre completo', 'calle', 'colonia', 'referencias']
+  const botWasCollectingAddress = !!lastBotMsg &&
+    addressPhrases.some((p) => lastBotMsg.content.toLowerCase().includes(p))
+
+  if (!botWasCollectingAddress) {
+    const triggeredKeyword = keywords.find((kw) => msgLower.includes(kw.toLowerCase()))
+    if (triggeredKeyword) {
+      return { shouldEscalate: true, reason: `keyword: "${triggeredKeyword}"` }
+    }
   }
 
   // 2. AI explicitly says it doesn't know / needs human

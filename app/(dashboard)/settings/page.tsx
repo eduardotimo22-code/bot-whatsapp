@@ -35,13 +35,17 @@ async function saveSettings(formData: FormData) {
     'bot_name', 'tone', 'system_prompt',
     'business_hours_start', 'business_hours_end',
     'escalation_after_turns', 'owner_phone',
-    'notion_kb_db_id', 'notion_conversations_db_id', 'notion_leads_db_id', 'notion_scheduled_db_id',
+    'google_spreadsheet_id', 'orders_api_key',
     'appointment_notification_phone',
   ]
 
+  const phoneFields = ['owner_phone', 'appointment_notification_phone']
   for (const field of fields) {
     const val = formData.get(field)
-    if (val !== null) upsert.run(field, val.toString())
+    if (val === null) continue
+    // No sobreescribir teléfonos con string vacío — evita desactivación accidental
+    if (phoneFields.includes(field) && !val.toString().trim()) continue
+    upsert.run(field, val.toString())
   }
 
   // business_days — multi-value checkboxes
@@ -216,48 +220,40 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
 
-        {/* Notion */}
+        {/* Google Sheets */}
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Integración con Notion</CardTitle>
-            <CardDescription>IDs de las bases de datos de Notion (dejar vacío si no se usa)</CardDescription>
+            <CardTitle className="text-base">Base de Conocimiento — Google Sheets</CardTitle>
+            <CardDescription>
+              El bot lee el menú y las respuestas desde tu Google Sheet.
+              El Sheet debe tener dos pestañas: <strong>Conocimiento</strong> (Pregunta | Respuesta | Categoría | Activo) y <strong>Menu</strong> (Categoría | Producto | Descripción | Precio | Disponible).
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-1.5">
-              <Label htmlFor="notion_kb_db_id">Base de conocimiento</Label>
+              <Label htmlFor="google_spreadsheet_id">ID del Google Sheet</Label>
               <Input
-                id="notion_kb_db_id"
-                name="notion_kb_db_id"
-                defaultValue={settings.notion_kb_db_id}
-                placeholder="ID de la base de datos"
+                id="google_spreadsheet_id"
+                name="google_spreadsheet_id"
+                defaultValue={settings.google_spreadsheet_id}
+                placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
               />
+              <p className="text-xs text-muted-foreground">
+                Encuéntralo en la URL: docs.google.com/spreadsheets/d/<strong>ID_AQUÍ</strong>/edit. El Sheet debe estar compartido con el email de la cuenta de servicio (GOOGLE_SHEETS_CLIENT_EMAIL).
+              </p>
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="notion_conversations_db_id">Log de conversaciones</Label>
+              <Label htmlFor="orders_api_key">Llave secreta para pedidos de la web</Label>
               <Input
-                id="notion_conversations_db_id"
-                name="notion_conversations_db_id"
-                defaultValue={settings.notion_conversations_db_id}
-                placeholder="ID de la base de datos"
+                id="orders_api_key"
+                name="orders_api_key"
+                defaultValue={settings.orders_api_key}
+                placeholder="clave-secreta-aleatoria"
+                type="password"
               />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="notion_leads_db_id">Base de leads</Label>
-              <Input
-                id="notion_leads_db_id"
-                name="notion_leads_db_id"
-                defaultValue={settings.notion_leads_db_id}
-                placeholder="ID de la base de datos"
-              />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="notion_scheduled_db_id">Mensajes programados</Label>
-              <Input
-                id="notion_scheduled_db_id"
-                name="notion_scheduled_db_id"
-                defaultValue={settings.notion_scheduled_db_id}
-                placeholder="ID de la base de datos"
-              />
+              <p className="text-xs text-muted-foreground">
+                La web de Pizza Juniors envía esta llave en el header <code>x-api-key</code> al crear pedidos. Déjalo vacío para desactivar la validación.
+              </p>
             </div>
           </CardContent>
         </Card>

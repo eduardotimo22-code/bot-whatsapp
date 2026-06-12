@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Users, MessageSquare, Search, Pencil, Trash2, Check, X, ExternalLink } from 'lucide-react'
+import { Users, MessageSquare, Search, Pencil, Trash2, Check, X } from 'lucide-react'
 import type { Contact } from '@/types'
 import Link from 'next/link'
 import { toast } from 'sonner'
@@ -39,7 +39,6 @@ export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState<EditForm>({ name: '', email: '', interest: '' })
   const [saving, setSaving] = useState(false)
-  const [pushingId, setPushingId] = useState<string | null>(null)
 
   const q = search.trim().toLowerCase()
   const visible = q
@@ -51,8 +50,6 @@ export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[
           (c.interest ?? '').toLowerCase().includes(q)
       )
     : contacts
-
-  const withNotion = contacts.filter((c) => c.notion_page_id).length
 
   function startEdit(contact: ContactWithConv) {
     setEditingId(contact.id)
@@ -99,34 +96,12 @@ export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[
     }
   }
 
-  async function pushToNotion(id: string) {
-    setPushingId(id)
-    try {
-      const res = await fetch(`/api/contacts/${id}`, { method: 'POST' })
-      if (res.ok) {
-        const data = await res.json() as { notion_page_id: string }
-        setContacts((prev) =>
-          prev.map((c) => c.id === id ? { ...c, notion_page_id: data.notion_page_id } : c)
-        )
-        toast.success('Lead guardado en Notion')
-      } else {
-        const err = await res.json() as { error: string }
-        toast.error(err.error === 'already in Notion' ? 'Ya está en Notion' : 'Error al sincronizar')
-      }
-    } catch {
-      toast.error('Error de conexión')
-    } finally {
-      setPushingId(null)
-    }
-  }
-
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold">Contactos & Leads</h1>
         <p className="text-muted-foreground text-sm mt-1">
-          {contacts.length} contactos
-          {withNotion > 0 && ` · ${withNotion} en Notion`}
+          {contacts.length} contactos registrados
         </p>
       </div>
 
@@ -135,7 +110,7 @@ export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[
           <CardContent className="pt-8 pb-8 text-center text-muted-foreground">
             <Users className="h-8 w-8 mx-auto mb-3 opacity-30" />
             <p>No hay contactos aún.</p>
-            <p className="text-xs mt-1">El bot detecta y registra leads automáticamente durante las conversaciones.</p>
+            <p className="text-xs mt-1">El bot registra contactos automáticamente durante las conversaciones.</p>
           </CardContent>
         </Card>
       ) : (
@@ -231,20 +206,6 @@ export function ContactsList({ contacts: initial }: { contacts: ContactWithConv[
                                 </Badge>
                               )}
                               <Badge variant="outline" className="text-xs capitalize">{contact.source}</Badge>
-                              {contact.notion_page_id ? (
-                                <Badge variant="secondary" className="text-xs">Notion ✓</Badge>
-                              ) : (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  className="h-5 text-xs px-2"
-                                  onClick={() => pushToNotion(contact.id)}
-                                  disabled={pushingId === contact.id}
-                                >
-                                  <ExternalLink className="h-3 w-3 mr-1" />
-                                  {pushingId === contact.id ? 'Guardando…' : 'Enviar a Notion'}
-                                </Button>
-                              )}
                               <span className="text-xs text-muted-foreground">
                                 {new Date(contact.created_at).toLocaleDateString('es')}
                               </span>
