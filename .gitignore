@@ -44,3 +44,10 @@ next-env.d.ts
 data/*.db
 data/*.db-shm
 data/*.db-wal
+
+# local artifacts / sensitive
+datos bancarios de transferencia 1/
+dev.log
+dev-err.log
+ngrok.exe
+node_modules/
