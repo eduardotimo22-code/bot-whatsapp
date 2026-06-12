@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pizza-juniors-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-11-01",
+  // After running: wrangler d1 create pizza-juniors-bot
+  // replace REPLACE_WITH_YOUR_D1_DATABASE_ID with the database_id from the output
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "pizza-juniors-bot",
+      "database_id": "6737e192-a828-4ccb-9553-47af44aa091f"
+    }
+  ],
+  "kv_namespaces": [
+    {
+      "binding": "MENU_IMAGES",
+      "id": "e15a15c3d6604891b6ee9877398c4421"
+    }
+  ],
+  "triggers": {
+    "crons": [
+      "0 * * * *",
+      "0 22 * * *",
+      "41 4 * * *"
+    ]
+  }
+}

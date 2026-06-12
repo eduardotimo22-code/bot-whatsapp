@@ -1,0 +1,15 @@
+# Copy this file to .dev.vars and fill in your values
+# .dev.vars is used by wrangler dev for local testing
+
+OPENAI_API_KEY=sk-proj-...
+YCLOUD_API_KEY=your-ycloud-api-key
+YCLOUD_PHONE_NUMBER=+52...
+GOOGLE_SHEETS_CLIENT_EMAIL=your-service-account@your-project.iam.gserviceaccount.com
+GOOGLE_SHEETS_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIIEv...\n-----END PRIVATE KEY-----\n
+GOOGLE_SHEETS_SPREADSHEET_ID=your-spreadsheet-id
+
+# Optional: set to require signature verification on webhook (from YCloud dashboard)
+YCLOUD_WEBHOOK_SECRET=
+
+# Optional: protect /sync-kb endpoint
+ORDERS_API_KEY=
