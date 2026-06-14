@@ -2,9 +2,11 @@ import { verifyYCloudSignature } from './webhook'
 import { processMessage } from './processor'
 import { getOrCreateConversation, isDuplicateMessage, saveMessage, saveUserMessage, getSettings } from './db'
 import { syncKBFromSheets } from './knowledge'
+import { syncMenuFromSheets } from './menu'
 import { sendTextMessage } from './ycloud'
 import { isBusinessOpen, getCancunDateStr } from './hours'
 import { sendOpeningFollowUp, sendDailySalesReport } from './scheduler'
+import { normalizePhone, phoneInList, parseDbDateMs } from './phone'
 
 export interface Env {
   DB: D1Database
@@ -33,8 +35,20 @@ interface YCloudEvent {
   whatsappInboundMessage?: YCloudInboundMessage
 }
 
-function normalizePhone(phone: string): string {
-  return phone.startsWith('+') ? phone.slice(1) : phone
+// Mensajes generados por el propio bot (notificaciones a owners, escalado, reporte,
+// datos bancarios). Si reaparecen como entrantes (reenvíos, eco), NO deben procesarse
+// como mensaje de cliente: eso causa el bucle de retroalimentación que vimos.
+function isBotGeneratedMessage(text: string): boolean {
+  const t = text.trimStart()
+  const signatures = [
+    '🍕 *Nuevo pedido confirmado*',
+    '⚠️ *Escalado al humano*',
+    '📊 *Reporte de ventas',
+    '🍕 Turno iniciado',
+    '🏦 Aquí están nuestros datos',
+    '🧾 *Total a pagar',
+  ]
+  return signatures.some((s) => t.startsWith(s))
 }
 
 function json(data: unknown, status = 200): Response {
@@ -87,26 +101,41 @@ export default {
       if (env.ORDERS_API_KEY && apiKey !== env.ORDERS_API_KEY) {
         return json({ error: 'unauthorized' }, 401)
       }
-      ctx.waitUntil(syncKBFromSheets(env))
-      return json({ ok: true, message: 'KB sync triggered' })
+      ctx.waitUntil(Promise.all([syncKBFromSheets(env), syncMenuFromSheets(env)]))
+      return json({ ok: true, message: 'KB + menu sync triggered' })
     }
 
     return json({ error: 'not found' }, 404)
   },
 
   async scheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Interruptor global: bot apagado → no corren los crons (reporte, follow-up, sync KB)
+    const settings = await getSettings(env)
+    if (settings.bot_paused === 'true') {
+      console.log('[scheduled] Bot paused (bot_paused=true) — skipping cron', event.cron)
+      return
+    }
+
     if (event.cron === '41 4 * * *') {
       ctx.waitUntil(sendDailySalesReport(env))
     } else if (event.cron === '0 22 * * *') {
       ctx.waitUntil(sendOpeningFollowUp(env))
     } else {
-      ctx.waitUntil(syncKBFromSheets(env))
+      ctx.waitUntil(Promise.all([syncKBFromSheets(env), syncMenuFromSheets(env)]))
     }
   },
 }
 
 async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   try {
+    // Interruptor global: bot apagado → ignora todo el tráfico entrante (responde 200
+    // para que YCloud no reintente). Reversible cambiando el setting bot_paused en D1.
+    const settings = await getSettings(env)
+    if (settings.bot_paused === 'true') {
+      console.log('[webhook] Bot paused (bot_paused=true) — ignoring inbound message')
+      return json({ ok: true })
+    }
+
     const rawBody = await req.text()
     // YCloud real requests use "ycloud-signature: t=<ts>,s=<hex>"
     // Svix-based delivery uses svix-* headers
@@ -137,7 +166,26 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
 
     console.log('[webhook] msg type:', msg?.type, '| from:', msg?.from, '| text:', msg?.text?.body?.slice(0, 50))
 
-    if (!msg || msg.type !== 'text' || !msg.text?.body?.trim()) {
+    if (!msg) {
+      return json({ ok: true })
+    }
+
+    // Contenido no-texto (audio, imagen, video, sticker, documento): no podemos
+    // procesarlo, pero NO lo ignoramos en silencio — el cliente creería que no lo
+    // atendemos. Avisamos (solo dentro de horario) que escriba en texto.
+    const NON_TEXT_TYPES = ['audio', 'voice', 'image', 'video', 'sticker', 'document']
+    if (msg.type !== 'text' || !msg.text?.body?.trim()) {
+      if (NON_TEXT_TYPES.includes(msg.type) && isBusinessOpen()) {
+        const ask = 'Por ahora solo puedo leer mensajes de *texto* 🙏 Escríbeme tu pedido o tu pregunta y con gusto te atiendo 😊'
+        ctx.waitUntil(sendTextMessage(env, normalizePhone(msg.from), ask).catch(console.error))
+      }
+      return json({ ok: true })
+    }
+
+    // Corta el bucle: si el entrante es una notificación generada por el bot,
+    // se ignora (no se guarda como turno, no escala, no dispara IA).
+    if (isBotGeneratedMessage(msg.text.body)) {
+      console.log('[webhook] Bot-generated message echoed back — ignoring:', msg.from)
       return json({ ok: true })
     }
 
@@ -155,9 +203,8 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
     }
 
     // Detectar comando PAUSA enviado desde un owner phone
-    const settings = await getSettings(env)
     const ownerPhones: string[] = JSON.parse(settings.owner_phones ?? '[]')
-    const isOwner = ownerPhones.some((n) => phone.endsWith(n) || n.endsWith(phone))
+    const isOwner = phoneInList(phone, ownerPhones)
 
     // Verificar horario de atención — owners nunca están bloqueados
     if (!isOwner && !isBusinessOpen()) {
@@ -204,12 +251,12 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
 
     if (conv.status === 'escalated') {
       const noEscalate: string[] = JSON.parse(settings.no_escalate_phones ?? '[]')
-      const whitelisted = noEscalate.some((n) => phone.endsWith(n) || n.endsWith(phone))
+      const whitelisted = phoneInList(phone, noEscalate)
 
       // Calcular horas desde que se escaló
       const escalatedAt = (conv as unknown as { escalated_at: string | null }).escalated_at
       const hoursEscalated = escalatedAt
-        ? (Date.now() - new Date(escalatedAt + 'Z').getTime()) / 3_600_000
+        ? (Date.now() - parseDbDateMs(escalatedAt)) / 3_600_000
         : 999 // sin fecha = forzar reset
 
       if (!whitelisted && hoursEscalated < 24) return json({ ok: true })
@@ -223,7 +270,7 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
     // Chequeo de pausa manual — owners nunca bloqueados por pausa
     const pausedUntil = conv.paused_until
     if (!isOwner && pausedUntil) {
-      const pauseExpired = new Date(pausedUntil + 'Z').getTime() < Date.now()
+      const pauseExpired = parseDbDateMs(pausedUntil) < Date.now()
       if (!pauseExpired) {
         console.log(`[webhook] ${phone} paused until ${pausedUntil}, skipping`)
         return json({ ok: true })

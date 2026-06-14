@@ -1,4 +1,5 @@
 import type { Env } from './index'
+import { parseDbDateMs } from './phone'
 
 export interface Conversation {
   id: string
@@ -25,6 +26,14 @@ export interface KBEntry {
   category: string
 }
 
+export interface MenuItem {
+  category: string
+  product: string
+  description: string
+  price: number | null
+  available: boolean
+}
+
 const SETTINGS_DEFAULTS: [string, string][] = [
   ['bot_name', 'Junior'],
   ['tone', 'amigable, rápido y entusiasta con la comida'],
@@ -39,6 +48,7 @@ const SETTINGS_DEFAULTS: [string, string][] = [
   ['no_escalate_phones', '[]'],
   ['owner_template_name', 'owner_notification'],
   ['owner_template_lang', 'es_MX'],
+  ['bot_paused', 'false'],
 ]
 
 const MEMORY_TTL_MS = 24 * 60 * 60 * 1000 // 24 horas
@@ -78,7 +88,7 @@ export async function getOrCreateConversation(
   if (existing) {
     // Detectar brecha de 24h — si la última actividad fue hace más de 24h, resetear memoria
     const lastMsgAt = existing.last_message_at
-    const age = lastMsgAt ? Date.now() - new Date(lastMsgAt + 'Z').getTime() : Infinity
+    const age = lastMsgAt ? Date.now() - parseDbDateMs(lastMsgAt) : Infinity
     const memoryExpired = age > MEMORY_TTL_MS
 
     const updates: string[] = ['last_message_at = CURRENT_TIMESTAMP']
@@ -177,12 +187,13 @@ export async function saveOrder(
   items: string,
   total: number | null,
   deliveryType: string | null,
-  paymentMethod?: string | null
+  paymentMethod?: string | null,
+  address?: string | null
 ): Promise<void> {
   await env.DB.prepare(
-    `INSERT INTO orders (id, conversation_id, items, total, source, status, delivery_type, payment_method)
-     VALUES (?, ?, ?, ?, 'whatsapp', 'confirmed', ?, ?)`
-  ).bind(crypto.randomUUID(), conversationId, items, total, deliveryType, paymentMethod ?? null).run()
+    `INSERT INTO orders (id, conversation_id, items, total, source, status, delivery_type, address, payment_method)
+     VALUES (?, ?, ?, ?, 'whatsapp', 'confirmed', ?, ?, ?)`
+  ).bind(crypto.randomUUID(), conversationId, items, total, deliveryType, address ?? null, paymentMethod ?? null).run()
 }
 
 export async function getKBEntries(env: Env): Promise<KBEntry[]> {
@@ -210,6 +221,37 @@ export async function replaceKBCache(
       env.DB.prepare(
         'INSERT INTO kb_cache (id, question, answer, category, active, synced_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
       ).bind(crypto.randomUUID(), e.question, e.answer, e.category, e.active ? 1 : 0)
+    ),
+  ]
+  await env.DB.batch(stmts)
+}
+
+export async function getMenuItems(env: Env): Promise<MenuItem[]> {
+  const { results } = await env.DB.prepare(
+    'SELECT category, product, description, price, available FROM menu_cache'
+  ).all<{ category: string; product: string; description: string; price: number | null; available: number }>()
+  return results.map((r) => ({
+    category: r.category,
+    product: r.product,
+    description: r.description,
+    price: r.price,
+    available: r.available === 1,
+  }))
+}
+
+export async function getMenuSyncAge(env: Env): Promise<number> {
+  const row = await env.DB.prepare('SELECT MAX(synced_at) as ts FROM menu_cache').first<{ ts: string | null }>()
+  if (!row?.ts) return Infinity
+  return Date.now() - new Date(row.ts).getTime()
+}
+
+export async function replaceMenuCache(env: Env, items: MenuItem[]): Promise<void> {
+  const stmts = [
+    env.DB.prepare('DELETE FROM menu_cache'),
+    ...items.map((m) =>
+      env.DB.prepare(
+        'INSERT INTO menu_cache (id, category, product, description, price, available, synced_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
+      ).bind(crypto.randomUUID(), m.category, m.product, m.description, m.price, m.available ? 1 : 0)
     ),
   ]
   await env.DB.batch(stmts)

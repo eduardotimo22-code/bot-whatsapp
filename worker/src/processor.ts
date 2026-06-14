@@ -4,6 +4,8 @@ import { checkEscalation, buildEscalationMessages } from './escalation'
 import { sendTextMessage, sendImageMessage } from './ycloud'
 import { notifyOwners, getOwnerPhones } from './notify'
 import { getMenuText } from './menu'
+import { computeOrderTotal, getPriceTable } from './pricing'
+import { phoneInList } from './phone'
 import {
   getSettings,
   getLatestUserMessage,
@@ -55,7 +57,12 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
       for (let i = 1; i <= total; i++) {
         const url = `${baseUrl}/menu/menu${i}.jpg`
         const caption = i === 1 ? '🍕 Menú Pizza Juniors Cozumel' : undefined
-        await sendImageMessage(env, phone, url, caption)
+        // try/catch por imagen: si una falla, las demás sí se envían
+        try {
+          await sendImageMessage(env, phone, url, caption)
+        } catch (imgErr) {
+          console.error(`[processor] Menu image ${i} failed:`, imgErr)
+        }
       }
       const confirmText = '¿Te antojó algo? Dime qué quieres ordenar 😊'
       await sendTextMessage(env, phone, confirmText)
@@ -95,8 +102,8 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
           ...context.history,
           { role: 'user', content: context.latestMessage },
         ],
-        max_tokens: 600,
-        temperature: 0.4,
+        max_tokens: 1000,
+        temperature: 0.2,
       }),
     })
 
@@ -112,9 +119,11 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
 
   console.log(`[processor] (${phone}) "${cleanResponse.slice(0, 100)}" | order: ${!!orderMatch}`)
 
-  // Pedidos del sitio web y teléfonos en whitelist nunca escalan
+  // Pedidos del sitio web, owners y teléfonos en whitelist nunca escalan.
+  // Incluir owner_phones evita que la línea de la tienda escale por ruido/pruebas.
   const noEscalate: string[] = JSON.parse(settings.no_escalate_phones ?? '[]')
-  const isWhitelisted = noEscalate.some((n) => phone.endsWith(n) || n.endsWith(phone))
+  const neverEscalate = [...noEscalate, ...getOwnerPhones(settings)]
+  const isWhitelisted = phoneInList(phone, neverEscalate)
 
   if (!orderMatch && !isWebsiteOrder(latestMessage) && !isWhitelisted) {
     const turnCount = await getUserTurnCount(env, phone, convInfo?.turns_reset_at ?? null)
@@ -157,19 +166,41 @@ async function handleOrderConfirmation(
   const total = getField('total')
   const tipo = getField('tipo')
   const pago = getField('pago')
+  // direccion va al FINAL del tag y puede contener comas, así que se captura
+  // hasta el cierre ']' (no con getField, que corta en la primera coma).
+  const direccionRaw = tag.match(/direccion=([^\]]+)/)?.[1]?.trim() ?? ''
+  const direccion = /^(n\/?a|na|-|)$/i.test(direccionRaw) ? '' : direccionRaw
+  const isDelivery = tipo.toLowerCase().includes('entrega')
 
-  await saveOrder(env, phone, items, parseFloat(total) || null, tipo || null, pago || null)
+  // Total AUTORITATIVO calculado en código (no confiamos en la suma del modelo),
+  // usando la tabla de precios del Google Sheet (fallback a la hardcodeada).
+  // Si algún item no matchea el menú, usamos el total del tag como respaldo y avisamos.
+  const priceTable = await getPriceTable(env)
+  const priced = computeOrderTotal(items, priceTable)
+  const tagTotal = parseFloat(total) || null
+  const verified = priced.unmatched.length === 0
+  const finalTotal = verified ? priced.total : tagTotal
+
+  await saveOrder(env, phone, items, finalTotal, tipo || null, pago || null, isDelivery ? direccion || null : null)
 
   const msg = [
     '🍕 *Nuevo pedido confirmado*',
     `👤 Cliente: ${nombre || contactName} (${phone})`,
     `📋 Items: ${items}`,
-    total && `💰 Total: $${total}`,
+    finalTotal != null && `💰 Total: $${finalTotal}`,
+    !verified && `⚠️ Total sin verificar (revisar items: ${priced.unmatched.join(', ')})`,
     tipo && `🚗 Tipo: ${tipo}`,
+    isDelivery && `📍 Dirección: ${direccion || '⚠️ FALTA — pídela al cliente'}`,
     pago && `💳 Pago: ${pago}`,
   ].filter(Boolean).join('\n')
 
   await notifyOwners(env, settings, msg)
+
+  // El cliente ve el total autoritativo aunque la prosa del modelo se haya equivocado.
+  if (verified && finalTotal != null) {
+    await sendTextMessage(env, phone, `🧾 *Total a pagar: $${finalTotal}*`)
+      .catch((err) => console.error('[order] Total message send error:', err))
+  }
 
   if (pago.toLowerCase().includes('transferencia')) {
     const baseUrl = 'https://pizza-juniors-bot.eduardo-timo22.workers.dev'
@@ -189,9 +220,11 @@ async function handleEscalation(
 
   const msgs = buildEscalationMessages(reason)
 
+  // NO guardamos el mensaje de escalado en el historial: si queda como 'assistant',
+  // el modelo aprende a repetir "Tu consulta requiere una atención más detallada…"
+  // y lo mezcla con respuestas de precio en conversaciones siguientes.
   try {
-    const escalationMsgId = await sendTextMessage(env, phone, msgs.toUser)
-    await saveMessage(env, phone, 'assistant', msgs.toUser, escalationMsgId)
+    await sendTextMessage(env, phone, msgs.toUser)
   } catch (err) {
     console.error('[processor] Escalation user notify error:', err)
   }
