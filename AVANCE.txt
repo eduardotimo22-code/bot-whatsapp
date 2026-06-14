@@ -1,0 +1,99 @@
+================================================
+AVANCE DEL PROYECTO: Bot WhatsApp Pizza Juniors Cozumel
+Actualizado: 2026-06-14 (sesión #3)
+================================================
+
+[ESTADO ACTUAL — en 3 líneas]
+Bot en PRODUCCIÓN (Cloudflare Workers, D1+KV) pero AHORA APAGADO a propósito
+(bot_paused=true). Esta sesión hizo un análisis completo previo al encendido,
+corrigió 6 bugs de código y alineó el horario y el tag de pedidos en el system_prompt.
+El código ya está commiteado; FALTA deploy y luego encender.
+
+[HECHO EN LA ÚLTIMA SESIÓN — #3]
+- Análisis completo del worker (14 archivos). type-check limpio.
+- CORREGIDO en código (commit af1e0c4):
+  * C2 Dirección de entrega: nuevo campo direccion en el tag [PEDIDO_CONFIRMADO],
+    se guarda en orders.address y aparece en la notificación al owner (antes se
+    pedía al cliente pero se PERDÍA — pedidos a domicilio sin dirección).
+  * A1 max_tokens 600→1000 para que respuestas largas no trunquen el tag (se
+    perdía el pedido en silencio).
+  * A3 Mensajes no-texto (audio/imagen) ahora reciben aviso en vez de ignorarse.
+  * M1 Match de teléfonos por últimos 10 dígitos (nuevo worker/src/phone.ts) en
+    vez de endsWith (falsos positivos owner/whitelist).
+  * M2 Parseo robusto de fechas de SQLite (T explícita).
+  * M3 try/catch por imagen de menú.
+- CORREGIDO en D1 producción (settings, system_prompt):
+  * C1 Horario: era "24/7" (contradecía hours.ts y el msg de cierre). Ahora dice
+    "jueves a martes 5:00 PM a 11:40 PM, miércoles cerrado".
+  * Tag del system_prompt actualizado para incluir direccion al final.
+- Commiteado el trabajo de sesión #2 + #3 en un solo commit del worker (af1e0c4).
+
+[SIGUIENTE PASO INMEDIATO]
+>>> git push (hay commits locales sin pushear), luego deploy del worker:
+    cd worker && npm run type-check && npm run deploy
+    (deployar es SEGURO: el bot sigue pausado y no responderá hasta encenderlo) <<<
+
+[SIGUIENTES PASOS — en orden]
+1. git push origin master (commits locales sin subir).
+2. cd worker && npm run deploy (lleva las correcciones a producción; sigue pausado).
+3. SEGURIDAD antes de encender: setear el webhook secret (ver pendientes externos).
+   Sin él, el webhook acepta POSTs de cualquiera.
+4. Encender el bot: bot_paused=false (comando abajo) y probar con un mensaje real.
+5. Vigilar wrangler tail: confirmar pedido con dirección, total correcto y
+   [notify] Template sent a los owners.
+
+[PENDIENTES EXTERNOS — dependen del usuario]
+- C3 (SEGURIDAD): NO existe YCLOUD_WEBHOOK_SECRET en producción. Obtener el secret
+  del webhook en la consola de YCloud y setearlo:
+    cd worker && npx wrangler secret put YCLOUD_WEBHOOK_SECRET
+  (Opcional pero recomendado: ORDERS_API_KEY para proteger /sync-kb.)
+- Mantener precios/menú en la pestaña "Menu" del Google Sheet (fuente de verdad).
+- Rotar API key de YCloud en app.ycloud.com (estuvo expuesta — pendiente viejo).
+- Decidir el momento del encendido del bot.
+
+[RIESGOS CONOCIDOS NO RESUELTOS — para futuras sesiones]
+- A2 Race condition: si el cliente manda 2 mensajes muy seguidos, se disparan 2
+  procesos (ctx.waitUntil) que releen "el último mensaje" → posible doble
+  respuesta. Solución real requiere un lock (Durable Object) o cola. No resuelto.
+- max_tokens subido pero el total server-side sigue dependiendo de que el modelo
+  escriba bien los items en el tag (incluidos extras).
+
+[DECISIONES Y ACUERDOS — no obvios desde el código]
+- Horario REAL del negocio: jueves a martes 17:00–23:40, miércoles cerrado
+  (confirmado por el dueño esta sesión; se quitó el "24/7" del system_prompt).
+- Apagado del bot = reversible vía setting bot_paused (NO borrar el worker).
+- El menú/precios viven en el Google Sheet (pestaña Menu); el worker los cachea en
+  menu_cache. El hardcodeado en menu.ts/pricing.ts es solo FALLBACK.
+- 529871177992 ("Pizza Junior's") es la línea de la tienda → en owner_phones y
+  no_escalate_phones; nunca escala ni se procesa como cliente.
+- El total lo calcula el sistema (pricing.ts), no el modelo. Si un item no matchea,
+  se usa el total del tag como respaldo y la notificación marca "Total sin verificar".
+- direccion va al FINAL del tag (puede llevar comas) y se captura hasta el ']'.
+- Notificaciones a owners: SIEMPRE template-first (de sesión #1, sigue vigente).
+- business_hours_start/end/business_days en settings NO se usan (hours.ts hardcodea
+  el horario). Inconsistencia conocida y aceptada.
+
+[ARCHIVOS Y COMANDOS CLAVE]
+- worker/src/phone.ts: samePhone/phoneInList (match por 10 dígitos) + parseDbDateMs
+- worker/src/pricing.ts: tabla de precios (Sheet o fallback) + computeOrderTotal
+- worker/src/menu.ts: sync del menú desde Sheet + texto del system prompt
+- worker/src/processor.ts: pedido + dirección + total server-side + escalado
+- worker/src/index.ts: guard bot_paused + isBotGeneratedMessage + no-texto + crons
+- Apagar:  ...UPDATE settings SET value='true'  WHERE key='bot_paused'
+- Encender:...UPDATE settings SET value='false' WHERE key='bot_paused'
+  cd worker && npx wrangler d1 execute pizza-juniors-bot --remote --command "UPDATE settings SET value='false' WHERE key='bot_paused'"
+- cd worker && npm run type-check && npm run deploy: ciclo de deploy
+- npx wrangler tail (en worker/): logs de producción en vivo
+- Ver settings: ...d1 execute ... --command "SELECT key, value FROM settings"
+
+[HISTORIAL DE SESIONES]
+- 2026-06-14 (s#3): análisis completo previo al encendido; 6 fixes de código
+  (dirección de entrega, anti-truncado del tag, no-texto, match de teléfonos,
+  fechas, imágenes) + system_prompt alineado (horario real, tag con dirección).
+  Commit af1e0c4. Detectado C3: falta YCLOUD_WEBHOOK_SECRET en prod. Bot APAGADO.
+- 2026-06-13/14 (s#2): interruptor bot_paused; corte del bucle de notificaciones
+  (529871177992); owners no escalan; precios server-side (pricing.ts); menú/precios
+  conectados al Google Sheet (menu_cache). (Se commiteó junto con s#3 en af1e0c4.)
+- 2026-06-11/12 (s#1): Notificaciones permanentes por template (aprobado por Meta),
+  7 commits de la migración Notion->Sheets + worker + orders API, CLAUDE.md
+  reescrito, key filtrada limpiada, skill /bot-whatsapp-negocio actualizada.
