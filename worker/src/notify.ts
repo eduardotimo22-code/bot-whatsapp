@@ -32,6 +32,10 @@ export async function notifyOwners(env: Env, settings: Record<string, string>, t
     return
   }
 
+  // owner_notify_template='false' → modo solo-texto (gratis) mientras no haya saldo
+  // para templates. OJO: el texto libre solo llega si el owner tiene ventana de 24h
+  // abierta; fuera de ventana falla asíncronamente (131047) y no se entera nadie.
+  const useTemplate = settings.owner_notify_template !== 'false'
   const templateName = settings.owner_template_name || 'owner_notification'
   const templateLang = settings.owner_template_lang || 'es_MX'
   const botPhone = normalizePhone(env.YCLOUD_PHONE_NUMBER)
@@ -41,6 +45,17 @@ export async function notifyOwners(env: Env, settings: Record<string, string>, t
       console.log(`[notify] Skipping self-notification (${ownerPhone})`)
       continue
     }
+
+    if (!useTemplate) {
+      try {
+        const msgId = await sendTextMessage(env, ownerPhone, text)
+        console.log(`[notify] Text-only sent to ${ownerPhone} — msgId: ${msgId}`)
+      } catch (err) {
+        console.error(`[notify] Text-only failed for ${ownerPhone}:`, err)
+      }
+      continue
+    }
+
     try {
       const msgId = await sendTemplateMessage(env, ownerPhone, templateName, templateLang, [flattenForTemplate(text)])
       console.log(`[notify] Template sent to ${ownerPhone} — msgId: ${msgId}`)

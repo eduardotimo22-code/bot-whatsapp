@@ -48,6 +48,9 @@ const SETTINGS_DEFAULTS: [string, string][] = [
   ['no_escalate_phones', '[]'],
   ['owner_template_name', 'owner_notification'],
   ['owner_template_lang', 'es_MX'],
+  // 'true' = notifica a owners por template (de pago, llega fuera de ventana 24h).
+  // 'false' = solo texto gratis (solo llega si el owner tiene ventana 24h abierta).
+  ['owner_notify_template', 'true'],
   ['bot_paused', 'false'],
 ]
 
