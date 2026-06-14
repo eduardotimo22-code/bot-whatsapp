@@ -21,8 +21,8 @@ function normalizePhone(phone: string): string {
   return phone.startsWith('+') ? phone.slice(1) : phone
 }
 
-// Solo frases explícitas de "muestrame el menú" disparan las fotos
-// Las preguntas sobre productos/precios las responde GPT con el menú en el system prompt
+const BASE_URL = 'https://pizza-juniors-bot.eduardo-timo22.workers.dev'
+
 const MENU_TRIGGERS = [
   'ver el menú', 'ver el menu', 'manda el menú', 'manda el menu',
   'envía el menú', 'envía el menu', 'mándame el menu', 'mándame el menú',
@@ -33,10 +33,38 @@ const MENU_TRIGGERS = [
 
 function isMenuRequest(message: string): boolean {
   const lower = message.toLowerCase().trim()
-  // Coincidencia exacta de frase completa
   if (MENU_TRIGGERS.some((t) => lower.includes(t))) return true
-  // Mensaje que es SOLO la palabra "menú" o "menu" (nada más)
-  return lower === 'menú' || lower === 'menu'
+  // Solo "menu"/"menú"/"carta" (con artículo opcional)
+  if (/^(el |la )?(menú|menu|carta)\s*\??$/.test(lower)) return true
+  // Menciona el menú/carta junto con intención de pedirlo o verlo en foto
+  if (!/\b(menú|menu|carta)\b/.test(lower)) return false
+  return /\b(foto|fotos|imagen|imagenes|imágenes|manda|mandame|mándame|envia|envía|enviar|enviarme|enviame|envíame|ver|pasa|pasame|pásame|quiero|tienes|tiene|muestra|muestrame|muéstrame|tendras|tendrás)\b/.test(lower)
+}
+
+// Envía las fotos del menú desde KV. Se usa tanto en el atajo (sin GPT) como cuando
+// el modelo emite el tag [ENVIAR_MENU] en respuesta a una petición con contexto.
+async function sendMenuPhotos(env: Env, phone: string): Promise<void> {
+  const total = 7
+  for (let i = 1; i <= total; i++) {
+    const url = `${BASE_URL}/menu/menu${i}.jpg`
+    const caption = i === 1 ? '🍕 Menú Pizza Juniors Cozumel' : undefined
+    try {
+      await sendImageMessage(env, phone, url, caption)
+    } catch (imgErr) {
+      console.error(`[processor] Menu image ${i} failed:`, imgErr)
+    }
+  }
+}
+
+// Envía la imagen oficial con los datos bancarios. El modelo NUNCA escribe los datos
+// en texto (no los tiene); emite [ENVIAR_DATOS_BANCARIOS] y el sistema manda la foto.
+async function sendBankInfo(env: Env, phone: string): Promise<void> {
+  try {
+    await sendImageMessage(env, phone, `${BASE_URL}/menu/transfer_info.jpg`,
+      '🏦 Aquí están nuestros datos bancarios para tu transferencia:')
+  } catch (err) {
+    console.error('[processor] Bank info image failed:', err)
+  }
 }
 
 // Pedidos pre-formateados enviados desde el sitio web
@@ -58,21 +86,9 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
   // Shortcut: send menu photos directly without calling GPT
   if (isMenuRequest(latestMessage)) {
     try {
-      const baseUrl = 'https://pizza-juniors-bot.eduardo-timo22.workers.dev'
-      const total = 7
-      for (let i = 1; i <= total; i++) {
-        const url = `${baseUrl}/menu/menu${i}.jpg`
-        const caption = i === 1 ? '🍕 Menú Pizza Juniors Cozumel' : undefined
-        // try/catch por imagen: si una falla, las demás sí se envían
-        try {
-          await sendImageMessage(env, phone, url, caption)
-        } catch (imgErr) {
-          console.error(`[processor] Menu image ${i} failed:`, imgErr)
-        }
-      }
-      const confirmText = '¿Te antojó algo? Dime qué quieres ordenar 😊'
-      await sendTextMessage(env, phone, confirmText)
-      await saveMessage(env, phone, 'assistant', `[Menú enviado — ${total} fotos]`)
+      await sendMenuPhotos(env, phone)
+      await sendTextMessage(env, phone, '¿Te antojó algo? Dime qué quieres ordenar 😊')
+      await saveMessage(env, phone, 'assistant', '[Menú enviado — 7 fotos]')
       await updateConversationTimestamp(env, phone)
       console.log(`[processor] Sent menu images to ${phone}`)
     } catch (err) {
@@ -122,14 +138,18 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
 
   const orderMatch = aiResponse.match(/\[PEDIDO_CONFIRMADO:[^\]]+\]/)
   const cartMatch = aiResponse.match(/\[CARRITO:[^\]]+\]/)
+  const wantsMenu = /\[ENVIAR_MENU\]/i.test(aiResponse)
+  const wantsBank = /\[ENVIAR_DATOS_BANCARIOS\]/i.test(aiResponse)
   let cleanResponse = aiResponse
     .replace(/\[PEDIDO_CONFIRMADO:[^\]]+\]\s*/g, '')
     .replace(/\[CARRITO:[^\]]+\]\s*/g, '')
+    .replace(/\[ENVIAR_MENU\]\s*/gi, '')
+    .replace(/\[ENVIAR_DATOS_BANCARIOS\]\s*/gi, '')
     .trim()
 
-  console.log(`[processor] (${phone}) "${cleanResponse.slice(0, 100)}" | order: ${!!orderMatch} | cart: ${!!cartMatch}`)
+  console.log(`[processor] (${phone}) "${cleanResponse.slice(0, 100)}" | order: ${!!orderMatch} | cart: ${!!cartMatch} | menu: ${wantsMenu} | bank: ${wantsBank}`)
 
-  // Subtotal EN VIVO: el modelo nunca escribe dinero; el código lo calcula y lo anexa.
+  // Total EN VIVO: el modelo nunca escribe dinero; el código lo calcula y lo anexa.
   // Solo cuando hay carrito en progreso y aún NO es pedido confirmado. Si algún item
   // no se puede cotizar, NO mostramos número (fallo seguro) — el modelo sigue armando.
   if (cartMatch && !orderMatch) {
@@ -137,10 +157,10 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
       const priceTable = await getPriceTable(env)
       const priced = computeOrderTotal(parseItems(cartMatch[0]), priceTable)
       if (priced.unmatched.length === 0 && priced.total > 0) {
-        cleanResponse += `\n\n🧾 Subtotal: $${priced.total}`
+        cleanResponse += `\n\n🧾 Total de tu pedido: $${priced.total}`
       }
     } catch (err) {
-      console.error('[processor] Cart subtotal error:', err)
+      console.error('[processor] Cart total error:', err)
     }
   }
 
@@ -167,6 +187,10 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
     console.error('[processor] Send error:', err)
   }
   await saveMessage(env, phone, 'assistant', cleanResponse, ycloudMsgId)
+
+  // Acciones de imagen pedidas por el modelo según el contexto
+  if (wantsMenu) await sendMenuPhotos(env, phone)
+  if (wantsBank) await sendBankInfo(env, phone)
 
   if (orderMatch) {
     const contactRow = await env.DB.prepare(
