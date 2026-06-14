@@ -15,6 +15,7 @@ export interface PriceTable {
   quesoExtra: number
   ingredienteExtra: number
   orilla: number
+  refresco: number
 }
 
 // Pizzas por especialidad (precio mediana / grande) — FALLBACK si el Sheet falla.
@@ -56,6 +57,7 @@ export const FALLBACK_TABLE: PriceTable = {
   quesoExtra: 50,
   ingredienteExtra: 30,
   orilla: 50,
+  refresco: 38,
 }
 
 export interface PricedItem {
@@ -85,12 +87,18 @@ function norm(s: string): string {
 export function buildPriceTableFromItems(items: MenuItem[]): PriceTable {
   const pizzaMap = new Map<string, { name: string; mediana: number; grande: number }>()
   const promos: Record<string, number> = {}
-  let { pan, quesoExtra, ingredienteExtra, orilla } = FALLBACK_TABLE
+  let { pan, quesoExtra, ingredienteExtra, orilla, refresco } = FALLBACK_TABLE
 
   for (const it of items) {
     if (it.price == null) continue
     const n = norm(it.product)
     const cat = norm(it.category)
+
+    // Bebidas (refresco / coca / agua): precio suelto
+    if (cat.includes('bebida') || cat.includes('refresco') || /\b(refresco|coca|soda|agua)\b/.test(n)) {
+      refresco = it.price
+      continue
+    }
 
     if (n.includes('promo')) {
       const m = n.match(/#?\s*([123])\b/)
@@ -129,6 +137,7 @@ export function buildPriceTableFromItems(items: MenuItem[]): PriceTable {
     quesoExtra,
     ingredienteExtra,
     orilla,
+    refresco,
   }
 }
 
@@ -142,48 +151,66 @@ export async function getPriceTable(env: Env): Promise<PriceTable> {
   return FALLBACK_TABLE
 }
 
-// Extras que pueden venir como item aparte o pegados al nombre de la pizza
-// ("Hawaiana con borde de philadelphia", "Pepperoni con queso extra").
-function hasOrilla(n: string): boolean {
-  return n.includes('orilla') || n.includes('borde')
+// Bebidas sueltas (refresco / coca / agua). En promo NO se cobran aparte: el modelo
+// no debe listarlas como item separado cuando ya van dentro de una promo.
+function isBebida(n: string): boolean {
+  return /\b(refresco|refrescos|coca|soda|agua)\b/.test(n)
 }
-function hasQuesoExtra(n: string): boolean {
-  return n.includes('queso extra') || n.includes('extra queso')
-}
-function hasIngredienteExtra(n: string): boolean {
-  return n.includes('ingrediente extra') || n.includes('extra ingrediente') || n.includes('ingrediente adicional')
-}
-function bundledExtras(n: string, table: PriceTable): number {
-  return (hasOrilla(n) ? table.orilla : 0) + (hasQuesoExtra(n) ? table.quesoExtra : 0) + (hasIngredienteExtra(n) ? table.ingredienteExtra : 0)
+
+// Cargo por extras de una pizza:
+//  - orilla / borde de philadelphia → table.orilla
+//  - queso extra → table.quesoExtra
+//  - cada ingrediente extra → table.ingredienteExtra (cada uno marcado con "+" en el
+//    item, ej. "Margarita +jamon +tocino"; también se acepta "<ingrediente> extra").
+// Se opera sobre el texto CRUDO porque norm() elimina los "+".
+function extrasCharge(raw: string, table: PriceTable): number {
+  const s = raw.toLowerCase()
+  let charge = 0
+  if (/orilla|borde/.test(s)) charge += table.orilla
+  if (/queso extra|extra queso/.test(s)) charge += table.quesoExtra
+
+  const plusCount = (s.match(/\+/g) || []).length
+  const quesoWords = (s.match(/queso extra|extra queso/g) || []).length
+  const extraWords = (s.match(/\b(extra|adicional)\b/g) || []).length
+  // max() evita doble conteo si el modelo escribe "+jamon" y "jamon extra" a la vez.
+  // Se descuentan las ocurrencias de "queso extra" (ya cobradas como $50).
+  const ingredientExtras = Math.max(plusCount, Math.max(0, extraWords - quesoWords))
+  charge += ingredientExtras * table.ingredienteExtra
+  return charge
 }
 
 function priceOneItem(raw: string, table: PriceTable, pizzasBySpecificity: PriceTable['pizzas']): { unitPrice: number; matched: boolean } {
-  const n = norm(raw)
+  // La especialidad se matchea SOLO con la parte antes del primer "+", para que un
+  // ingrediente extra ("+pepperoni") no haga que una Margarita se cobre como Pepperoni.
+  const basePart = raw.split('+')[0]
+  const n = norm(basePart)
+  const nFull = norm(raw)
 
   // 1. Pan A/Q: va PRIMERO porque la pizza "Ajo" es substring de "pan de ajo".
   if (/\bpan\b/.test(n)) return { unitPrice: table.pan, matched: true }
 
-  // 2. Promo (#1/#2/#3)
-  if (n.includes('promo')) {
-    const m = n.match(/#?\s*([123])\b/)
+  // 2. Bebida suelta
+  if (isBebida(n)) return { unitPrice: table.refresco, matched: true }
+
+  // 3. Promo (#1/#2/#3)
+  if (nFull.includes('promo')) {
+    const m = nFull.match(/#?\s*([123])\b/)
     if (m && table.promos[m[1]] != null) return { unitPrice: table.promos[m[1]], matched: true }
   }
 
-  // 3. Pizza por especialidad + tamaño (default grande). Va ANTES que los extras
-  // sueltos para que "Pizza con queso extra" no se cobre como solo el extra; los
-  // extras pegados al nombre se suman al precio de la pizza.
+  // 4. Pizza por especialidad + tamaño (default grande) + extras marcados.
   const isMediana = /\bmedian[ao]\b/.test(n)
   for (const p of pizzasBySpecificity) {
     if (n.includes(norm(p.name))) {
       const base = isMediana ? p.mediana : p.grande
-      return { unitPrice: base + bundledExtras(n, table), matched: true }
+      return { unitPrice: base + extrasCharge(raw, table), matched: true }
     }
   }
 
-  // 4. Otros extras como item suelto (sin pizza en el texto)
-  if (hasOrilla(n)) return { unitPrice: table.orilla, matched: true }
-  if (hasQuesoExtra(n)) return { unitPrice: table.quesoExtra, matched: true }
-  if (hasIngredienteExtra(n)) return { unitPrice: table.ingredienteExtra, matched: true }
+  // 5. Extras como item suelto (sin pizza en el texto)
+  if (/orilla|borde/.test(nFull)) return { unitPrice: table.orilla, matched: true }
+  if (/queso extra|extra queso/.test(nFull)) return { unitPrice: table.quesoExtra, matched: true }
+  if (/ingrediente (extra|adicional)|(extra|adicional) ingrediente/.test(nFull)) return { unitPrice: table.ingredienteExtra, matched: true }
 
   return { unitPrice: 0, matched: false }
 }

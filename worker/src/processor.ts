@@ -44,6 +44,12 @@ function isWebsiteOrder(message: string): boolean {
   return message.includes('💰 Total:') || message.includes('📋 Mis datos:')
 }
 
+// Extrae el valor de items= de un tag [CARRITO: ...] o [PEDIDO_CONFIRMADO: ...].
+// items puede contener comas, así que se corta hasta el siguiente campo conocido o ']'.
+function parseItems(tag: string): string {
+  return tag.match(/items=([\s\S]+?)(?:,\s*(?:tipo|total|nombre|pago|direccion)=|\])/)?.[1]?.trim() ?? ''
+}
+
 // phone is also used as conversationId
 export async function processMessage(env: Env, phone: string): Promise<void> {
   const latestMessage = await getLatestUserMessage(env, phone)
@@ -96,7 +102,7 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
         Authorization: `Bearer ${env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4o',
         messages: [
           { role: 'system', content: context.systemPrompt },
           ...context.history,
@@ -115,17 +121,36 @@ export async function processMessage(env: Env, phone: string): Promise<void> {
   }
 
   const orderMatch = aiResponse.match(/\[PEDIDO_CONFIRMADO:[^\]]+\]/)
-  const cleanResponse = aiResponse.replace(/\[PEDIDO_CONFIRMADO:[^\]]+\]\s*/g, '').trim()
+  const cartMatch = aiResponse.match(/\[CARRITO:[^\]]+\]/)
+  let cleanResponse = aiResponse
+    .replace(/\[PEDIDO_CONFIRMADO:[^\]]+\]\s*/g, '')
+    .replace(/\[CARRITO:[^\]]+\]\s*/g, '')
+    .trim()
 
-  console.log(`[processor] (${phone}) "${cleanResponse.slice(0, 100)}" | order: ${!!orderMatch}`)
+  console.log(`[processor] (${phone}) "${cleanResponse.slice(0, 100)}" | order: ${!!orderMatch} | cart: ${!!cartMatch}`)
+
+  // Subtotal EN VIVO: el modelo nunca escribe dinero; el código lo calcula y lo anexa.
+  // Solo cuando hay carrito en progreso y aún NO es pedido confirmado. Si algún item
+  // no se puede cotizar, NO mostramos número (fallo seguro) — el modelo sigue armando.
+  if (cartMatch && !orderMatch) {
+    try {
+      const priceTable = await getPriceTable(env)
+      const priced = computeOrderTotal(parseItems(cartMatch[0]), priceTable)
+      if (priced.unmatched.length === 0 && priced.total > 0) {
+        cleanResponse += `\n\n🧾 Subtotal: $${priced.total}`
+      }
+    } catch (err) {
+      console.error('[processor] Cart subtotal error:', err)
+    }
+  }
 
   // Pedidos del sitio web, owners y teléfonos en whitelist nunca escalan.
-  // Incluir owner_phones evita que la línea de la tienda escale por ruido/pruebas.
+  // Un pedido en curso (carrito) tampoco debe escalar por número de turnos.
   const noEscalate: string[] = JSON.parse(settings.no_escalate_phones ?? '[]')
   const neverEscalate = [...noEscalate, ...getOwnerPhones(settings)]
   const isWhitelisted = phoneInList(phone, neverEscalate)
 
-  if (!orderMatch && !isWebsiteOrder(latestMessage) && !isWhitelisted) {
+  if (!orderMatch && !cartMatch && !isWebsiteOrder(latestMessage) && !isWhitelisted) {
     const turnCount = await getUserTurnCount(env, phone, convInfo?.turns_reset_at ?? null)
     const escalation = checkEscalation(latestMessage, cleanResponse, settings, turnCount)
 
@@ -162,8 +187,7 @@ async function handleOrderConfirmation(
 ): Promise<void> {
   const getField = (key: string) => tag.match(new RegExp(`${key}=([^,\\]]+)`))?.[1]?.trim() ?? ''
   const nombre = getField('nombre')
-  const items = tag.match(/items=([\s\S]+?),\s*total=/)?.[1]?.trim() ?? getField('items')
-  const total = getField('total')
+  const items = parseItems(tag)
   const tipo = getField('tipo')
   const pago = getField('pago')
   // direccion va al FINAL del tag y puede contener comas, así que se captura
@@ -172,14 +196,13 @@ async function handleOrderConfirmation(
   const direccion = /^(n\/?a|na|-|)$/i.test(direccionRaw) ? '' : direccionRaw
   const isDelivery = tipo.toLowerCase().includes('entrega')
 
-  // Total AUTORITATIVO calculado en código (no confiamos en la suma del modelo),
-  // usando la tabla de precios del Google Sheet (fallback a la hardcodeada).
-  // Si algún item no matchea el menú, usamos el total del tag como respaldo y avisamos.
+  // Total AUTORITATIVO calculado SIEMPRE en código. NUNCA se usa el número del modelo.
+  // Fallo seguro: si algún item no se puede cotizar, NO se le da un total al cliente —
+  // se marca REVISAR PRECIO para el dueño. Nunca mostramos un monto inventado.
   const priceTable = await getPriceTable(env)
   const priced = computeOrderTotal(items, priceTable)
-  const tagTotal = parseFloat(total) || null
-  const verified = priced.unmatched.length === 0
-  const finalTotal = verified ? priced.total : tagTotal
+  const verified = priced.unmatched.length === 0 && priced.total > 0
+  const finalTotal = verified ? priced.total : null
 
   await saveOrder(env, phone, items, finalTotal, tipo || null, pago || null, isDelivery ? direccion || null : null)
 
@@ -187,8 +210,9 @@ async function handleOrderConfirmation(
     '🍕 *Nuevo pedido confirmado*',
     `👤 Cliente: ${nombre || contactName} (${phone})`,
     `📋 Items: ${items}`,
-    finalTotal != null && `💰 Total: $${finalTotal}`,
-    !verified && `⚠️ Total sin verificar (revisar items: ${priced.unmatched.join(', ')})`,
+    verified
+      ? `💰 Total: $${priced.total}`
+      : `⚠️ REVISAR PRECIO — no se pudo cotizar automáticamente${priced.unmatched.length ? ` (revisar: ${priced.unmatched.join(', ')})` : ''}`,
     tipo && `🚗 Tipo: ${tipo}`,
     isDelivery && `📍 Dirección: ${direccion || '⚠️ FALTA — pídela al cliente'}`,
     pago && `💳 Pago: ${pago}`,
@@ -196,10 +220,14 @@ async function handleOrderConfirmation(
 
   await notifyOwners(env, settings, msg)
 
-  // El cliente ve el total autoritativo aunque la prosa del modelo se haya equivocado.
-  if (verified && finalTotal != null) {
-    await sendTextMessage(env, phone, `🧾 *Total a pagar: $${finalTotal}*`)
+  // El cliente solo ve un total calculado por el código. Si no se pudo cotizar, no se
+  // le manda un número: se le avisa que el equipo confirma el total.
+  if (verified) {
+    await sendTextMessage(env, phone, `🧾 *Total a pagar: $${priced.total}*`)
       .catch((err) => console.error('[order] Total message send error:', err))
+  } else {
+    await sendTextMessage(env, phone, '¡Listo! Tu pedido quedó registrado 🙌 En un momento el equipo te confirma el total. 🙏')
+      .catch((err) => console.error('[order] Pending-total message send error:', err))
   }
 
   if (pago.toLowerCase().includes('transferencia')) {
