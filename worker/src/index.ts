@@ -223,9 +223,11 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
       return json({ ok: true })
     }
 
-    if (isOwner && msg.text.body.trim().toUpperCase().startsWith('PAUSA')) {
-      const targetRaw = msg.text.body.trim().slice(5).trim()
-      const targetPhone = normalizePhone(targetRaw)
+    // Comandos de owner: tolerantes a variantes (PAUSA/PAUSAR, ACTIVA/ACTIVAR/REACTIVAR)
+    const upperCmd = msg.text.body.trim().toUpperCase()
+    const pauseMatch = isOwner && upperCmd.match(/^PAUSAR?\s+(\S+)/)
+    if (pauseMatch) {
+      const targetPhone = normalizePhone(pauseMatch[1])
       if (targetPhone.length >= 10) {
         await env.DB.prepare(
           "UPDATE conversations SET paused_until = datetime('now', '+2 hours') WHERE id = ?"
@@ -236,9 +238,9 @@ async function handleWebhook(req: Request, env: Env, ctx: ExecutionContext): Pro
       return json({ ok: true })
     }
 
-    if (isOwner && msg.text.body.trim().toUpperCase().startsWith('ACTIVAR')) {
-      const targetRaw = msg.text.body.trim().slice(7).trim()
-      const targetPhone = normalizePhone(targetRaw)
+    const activarMatch = isOwner && upperCmd.match(/^(?:ACTIVAR?|REACTIVAR)\s+(\S+)/)
+    if (activarMatch) {
+      const targetPhone = normalizePhone(activarMatch[1])
       if (targetPhone.length >= 10) {
         await env.DB.prepare(
           "UPDATE conversations SET paused_until = NULL, status = 'active', escalated_at = NULL WHERE id = ?"
